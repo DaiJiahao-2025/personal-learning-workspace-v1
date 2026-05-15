@@ -1,9 +1,26 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { EditorContent, useEditor } from '@tiptap/vue-3';
 import StarterKit from '@tiptap/starter-kit';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
+
+type YoutubePlayer = {
+  getCurrentTime: () => number
+  pauseVideo: () => void
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void
+  destroy: () => void
+}
+
+declare global {
+  interface Window {
+    YT?: {
+      Player: new (element: HTMLIFrameElement, options?: Record<string, unknown>) => YoutubePlayer
+    }
+    onYouTubeIframeAPIReady?: () => void
+  }
+}
+
 const activeMenu = ref('课程管理')
 const isSidebarCollapsed = ref(false)
 const menuItems = [
@@ -12,10 +29,27 @@ const menuItems = [
   { name: 'AI总结', icon: '✨'},
   { name: '设置', icon: '⚙️',}
 ]
+const courseMenuName = menuItems[0].name
+const noteMenuName = menuItems[1].name
 const settingsMenuName = menuItems[3].name
 
 function changeMenu(menuName: string) {
+  saveCurrentNote()
+
+  rememberCurrentPlaybackTime()
+  pauseCurrentPlayer()
+
   activeMenu.value = menuName
+  fullscreenMode.value = null
+
+  if (menuName === courseMenuName) {
+    backToCourseList()
+  }
+
+  if (menuName === noteMenuName) {
+    initializeNoteWorkspace()
+    loadCurrentNote()
+  }
 }
 
 function toggleSidebar() {
@@ -29,6 +63,14 @@ type Course = {
   status: string
   cover: string
   theme: string
+  lessons: Lesson[]
+}
+
+type Lesson = {
+  id: number
+  title: string
+  status: string
+  time: string
 }
 
 const COURSE_STORAGE_KEY = 'learnflow_courses'
@@ -41,39 +83,7 @@ function getCourseVideoKey(courseId: number, lessonId: number) {
   return `learnflow_video_course_${courseId}_lesson_${lessonId}`
 }
 
-function isCourse(value: unknown): value is Course {
-  if (!value || typeof value !== 'object') return false
-
-  const course = value as Partial<Course>
-
-  return (
-    typeof course.id === 'number' &&
-    typeof course.title === 'string' &&
-    typeof course.progress === 'number' &&
-    typeof course.status === 'string' &&
-    typeof course.cover === 'string' &&
-    typeof course.theme === 'string'
-  )
-}
-
-function loadSavedCourses() {
-  try {
-    const savedCourses = JSON.parse(localStorage.getItem(COURSE_STORAGE_KEY) ?? '[]')
-    return Array.isArray(savedCourses) ? savedCourses.filter(isCourse) : []
-  } catch {
-    return []
-  }
-}
-
-function saveCourses() {
-  localStorage.setItem(COURSE_STORAGE_KEY, JSON.stringify(courses.value))
-}
-
-const courses = ref<Course[]>(loadSavedCourses())
-const currentPage = ref<'courseList' | 'courseDetail'>('courseList')
-const selectedCourse = ref<Course | null>(null)
-
-const lessons = [
+const defaultLessons: Lesson[] = [
   {
     id: 1,
     title: '课程介绍',
@@ -111,12 +121,100 @@ const lessons = [
     time: ''
   }
 ]
-const selectedLesson = ref(lessons[2])
+
+function cloneDefaultLessons() {
+  return defaultLessons.map((lesson) => ({ ...lesson }))
+}
+
+function isLesson(value: unknown): value is Lesson {
+  if (!value || typeof value !== 'object') return false
+
+  const lesson = value as Partial<Lesson>
+
+  return (
+    typeof lesson.id === 'number' &&
+    typeof lesson.title === 'string' &&
+    typeof lesson.status === 'string' &&
+    typeof lesson.time === 'string'
+  )
+}
+
+function normalizeCourse(value: unknown): Course | null {
+  if (!value || typeof value !== 'object') return null
+
+  const course = value as Partial<Course>
+
+  if (
+    typeof course.id !== 'number' ||
+    typeof course.title !== 'string' ||
+    typeof course.progress !== 'number' ||
+    typeof course.status !== 'string' ||
+    typeof course.cover !== 'string' ||
+    typeof course.theme !== 'string'
+  ) {
+    return null
+  }
+
+  const lessons = Array.isArray(course.lessons) ? course.lessons.filter(isLesson) : cloneDefaultLessons()
+
+  return {
+    id: course.id,
+    title: course.title,
+    progress: course.progress,
+    status: course.status,
+    cover: course.cover,
+    theme: course.theme,
+    lessons: lessons.length > 0 ? lessons : cloneDefaultLessons()
+  }
+}
+
+function loadSavedCourses() {
+  try {
+    const savedCourses = JSON.parse(localStorage.getItem(COURSE_STORAGE_KEY) ?? '[]')
+    return Array.isArray(savedCourses) ? savedCourses.map(normalizeCourse).filter((course): course is Course => Boolean(course)) : []
+  } catch {
+    return []
+  }
+}
+
+function saveCourses() {
+  localStorage.setItem(COURSE_STORAGE_KEY, JSON.stringify(courses.value))
+}
+
+const courses = ref<Course[]>(loadSavedCourses())
+const currentPage = ref<'courseList' | 'courseDetail'>('courseList')
+const selectedCourse = ref<Course | null>(null)
+const isAddCourseDialogOpen = ref(false)
+const newCourseName = ref('')
+const newCourseLink = ref('')
+const newCourseCoverUrl = ref('')
+const addCourseError = ref('')
+const isManageCourseDialogOpen = ref(false)
+const managedCourse = ref<Course | null>(null)
+const managedCourseName = ref('')
+const managedCourseLink = ref('')
+const manageCourseError = ref('')
+const isDeleteCourseConfirming = ref(false)
+const isAddLessonDialogOpen = ref(false)
+const newLessonTitle = ref('')
+const newLessonVideoLink = ref('')
+const addLessonError = ref('')
+const selectedLesson = ref<Lesson>(cloneDefaultLessons()[2])
+const noteWorkspaceCourse = ref<Course | null>(null)
+const noteWorkspaceLesson = ref<Lesson | null>(null)
+const expandedNoteCourseIds = ref<number[]>([])
+const autoRevealCurrentNote = ref(true)
+const notesFolderListRef = ref<HTMLElement | null>(null)
+const isCreateWorkspaceNoteDialogOpen = ref(false)
+const newWorkspaceNoteTitle = ref('')
+const createWorkspaceNoteError = ref('')
+const isCreateWorkspaceFolderDialogOpen = ref(false)
+const newWorkspaceFolderTitle = ref('')
+const createWorkspaceFolderError = ref('')
 const currentNote = ref('')
 const currentVideoUrl = ref('')
-const activeStudyTab = ref<'video' | 'notes' | 'ai'>('video')
-type StudyTab = typeof activeStudyTab.value
-type FullscreenMode = Exclude<StudyTab, 'ai'> | null
+type FullscreenMode = 'video' | 'notes' | null
+type StudyNotePosition = 'bottom' | 'right'
 type ShortcutAction = 'videoFullscreen' | 'notesFullscreen' | 'exitFullscreen'
 type ShortcutBinding = {
   key: string
@@ -127,7 +225,22 @@ type ShortcutBinding = {
 }
 
 const SHORTCUT_STORAGE_KEY = 'learnflow_shortcuts'
+const STUDY_SPLIT_STORAGE_KEY = 'learnflow_study_split_ratio'
+const STUDY_NOTE_POSITION_STORAGE_KEY = 'learnflow_study_note_position'
+const DEFAULT_STUDY_SPLIT_RATIO = 0.6
+const DEFAULT_STUDY_NOTE_POSITION: StudyNotePosition = 'bottom'
+const STUDY_VIDEO_MIN_HEIGHT = 280
+const STUDY_NOTES_MIN_HEIGHT = 220
+const STUDY_SPLIT_HANDLE_HEIGHT = 8
 const fullscreenMode = ref<FullscreenMode>(null)
+const videoIframeRef = ref<HTMLIFrameElement | null>(null)
+const studyWorkspaceRef = ref<HTMLElement | null>(null)
+const studySplitRatio = ref(loadSavedStudySplitRatio())
+const studyNotePosition = ref<StudyNotePosition>(loadSavedStudyNotePosition())
+const isResizingStudySplit = ref(false)
+const activeStudySplitPointerId = ref<number | null>(null)
+const isLessonPanelCollapsed = ref(false)
+const savedPlaybackSeconds = ref<Record<string, number>>({})
 const recordingShortcutAction = ref<ShortcutAction | null>(null)
 const shortcutMessage = ref('')
 const defaultShortcuts: Record<ShortcutAction, ShortcutBinding> = {
@@ -144,6 +257,9 @@ const shortcuts = ref<Record<ShortcutAction, ShortcutBinding>>(loadSavedShortcut
 let autoSaveTimer: ReturnType<typeof setTimeout> | undefined
 let shouldSkipNextAutoSave = false
 let isApplyingEditorContent = false
+let youtubePlayer: YoutubePlayer | null = null
+let youtubePlayerVideoId = ''
+let youtubeApiReadyPromise: Promise<void> | null = null
 const turndownService = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
@@ -152,6 +268,22 @@ const turndownService = new TurndownService({
 
 function markdownToHtml(markdown: string) {
   return marked.parse(markdown, { async: false }) as string
+}
+
+const markdownPastePatterns = [
+  /(^|\n)\s{0,3}#{1,6}\s+\S/,
+  /(^|\n)\s{0,3}([-*+]\s+\S|\d+\.\s+\S)/,
+  /(^|\n)\s{0,3}>\s+\S/,
+  /(^|\n)```/,
+  /(^|\n)\s{0,3}(-{3,}|\*{3,}|_{3,})\s*($|\n)/,
+  /\*\*[^*\n]+?\*\*|__[^_\n]+?__|`[^`\n]+?`|\[[^\]\n]+?\]\([^)]+?\)/,
+  /(^|\n)\|.+\|/
+]
+
+function shouldParseMarkdownPaste(text: string) {
+  const trimmedText = text.trim()
+
+  return trimmedText.length > 0 && markdownPastePatterns.some((pattern) => pattern.test(trimmedText))
 }
 
 function isShortcutBinding(value: unknown): value is ShortcutBinding {
@@ -184,6 +316,56 @@ function loadSavedShortcuts() {
 
 function saveShortcuts() {
   localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(shortcuts.value))
+}
+
+function clampStudySplitRatio(ratio: number) {
+  if (!Number.isFinite(ratio)) return DEFAULT_STUDY_SPLIT_RATIO
+  return Math.min(0.78, Math.max(0.32, ratio))
+}
+
+function loadSavedStudySplitRatio() {
+  const savedRatio = Number(localStorage.getItem(STUDY_SPLIT_STORAGE_KEY))
+  return clampStudySplitRatio(savedRatio || DEFAULT_STUDY_SPLIT_RATIO)
+}
+
+function saveStudySplitRatio() {
+  localStorage.setItem(STUDY_SPLIT_STORAGE_KEY, String(studySplitRatio.value))
+}
+
+function isStudyNotePosition(value: string | null): value is StudyNotePosition {
+  return value === 'bottom' || value === 'right'
+}
+
+function loadSavedStudyNotePosition() {
+  const savedPosition = localStorage.getItem(STUDY_NOTE_POSITION_STORAGE_KEY)
+  return isStudyNotePosition(savedPosition) ? savedPosition : DEFAULT_STUDY_NOTE_POSITION
+}
+
+function saveStudyNotePosition() {
+  localStorage.setItem(STUDY_NOTE_POSITION_STORAGE_KEY, studyNotePosition.value)
+}
+
+function toggleStudyNotePosition() {
+  if (studyNotePosition.value === 'bottom') {
+    stopStudySplitResize()
+  }
+
+  studyNotePosition.value = studyNotePosition.value === 'bottom' ? 'right' : 'bottom'
+  saveStudyNotePosition()
+}
+
+const studyWorkspaceStyle = computed(() => (
+  studyNotePosition.value === 'bottom'
+    ? {
+        gridTemplateRows: `${studySplitRatio.value * 100}% ${STUDY_SPLIT_HANDLE_HEIGHT}px minmax(${STUDY_NOTES_MIN_HEIGHT}px, 1fr)`
+      }
+    : {
+        gridTemplateRows: 'minmax(0, 1fr)'
+      }
+))
+
+function toggleLessonPanel() {
+  isLessonPanelCollapsed.value = !isLessonPanelCollapsed.value
 }
 
 function normalizeShortcutKey(key: string) {
@@ -278,7 +460,11 @@ function toggleStudyFullscreen(mode: Exclude<FullscreenMode, null>) {
     return
   }
 
-  activeStudyTab.value = mode
+  if (mode === 'notes') {
+    rememberCurrentPlaybackTime()
+    pauseCurrentPlayer()
+  }
+
   fullscreenMode.value = mode
 }
 
@@ -338,6 +524,15 @@ const noteEditor = useEditor({
   ],
   content: '',
   editorProps: {
+    handlePaste: (_view, event) => {
+      const pastedText = event.clipboardData?.getData('text/plain') ?? ''
+
+      if (!shouldParseMarkdownPaste(pastedText) || !noteEditor.value) return false
+
+      event.preventDefault()
+      noteEditor.value.commands.insertContent(markdownToHtml(pastedText))
+      return true
+    },
     attributes: {
       class: 'tiptap-note-content'
     }
@@ -350,8 +545,141 @@ const noteEditor = useEditor({
 
 const savedText = ref('未保存')
 
+const currentLessons = computed(() => selectedCourse.value?.lessons ?? cloneDefaultLessons())
+const activeNoteCourse = computed(() => activeMenu.value === noteMenuName ? noteWorkspaceCourse.value : selectedCourse.value)
+const activeNoteLesson = computed(() => activeMenu.value === noteMenuName ? noteWorkspaceLesson.value : selectedLesson.value)
+const areAllNoteCoursesExpanded = computed(() => (
+  courses.value.length > 0 &&
+  courses.value.every((course) => expandedNoteCourseIds.value.includes(course.id))
+))
 const currentVideoEmbedUrl = computed(() => getVideoEmbedUrl(currentVideoUrl.value))
 const currentVideoPlatform = computed(() => getVideoPlatform(currentVideoUrl.value))
+const currentYoutubeVideoId = computed(() => getYoutubeVideoId(currentVideoUrl.value) ?? '')
+
+function getPlaybackKey() {
+  if (!selectedCourse.value) return ''
+  return `${selectedCourse.value.id}_${selectedLesson.value.id}`
+}
+
+function savePlaybackTime(seconds: number) {
+  const key = getPlaybackKey()
+
+  if (!key || !Number.isFinite(seconds) || seconds < 0) return
+
+  savedPlaybackSeconds.value = {
+    ...savedPlaybackSeconds.value,
+    [key]: seconds
+  }
+}
+
+function clearCurrentPlaybackTime() {
+  const key = getPlaybackKey()
+
+  if (!key) return
+
+  const remainingTimes = { ...savedPlaybackSeconds.value }
+  delete remainingTimes[key]
+  savedPlaybackSeconds.value = remainingTimes
+}
+
+function loadYoutubeApi() {
+  if (window.YT?.Player) return Promise.resolve()
+  if (youtubeApiReadyPromise) return youtubeApiReadyPromise
+
+  youtubeApiReadyPromise = new Promise((resolve) => {
+    const previousReadyHandler = window.onYouTubeIframeAPIReady
+
+    window.onYouTubeIframeAPIReady = () => {
+      previousReadyHandler?.()
+      resolve()
+    }
+
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const script = document.createElement('script')
+      script.src = 'https://www.youtube.com/iframe_api'
+      document.head.appendChild(script)
+    }
+  })
+
+  return youtubeApiReadyPromise
+}
+
+function destroyYoutubePlayer() {
+  try {
+    youtubePlayer?.destroy()
+  } catch {
+    // The iframe may already have been removed by Vue during a video switch.
+  }
+
+  youtubePlayer = null
+  youtubePlayerVideoId = ''
+}
+
+async function initializeYoutubePlayer() {
+  if (!videoIframeRef.value || !currentYoutubeVideoId.value) {
+    destroyYoutubePlayer()
+    return
+  }
+
+  if (youtubePlayer && youtubePlayerVideoId === currentYoutubeVideoId.value) return
+
+  destroyYoutubePlayer()
+  await loadYoutubeApi()
+
+  if (!videoIframeRef.value || !currentYoutubeVideoId.value) return
+
+  youtubePlayer = new window.YT!.Player(videoIframeRef.value, {
+    events: {
+      onReady: () => {
+        restoreCurrentPlaybackTime()
+      }
+    }
+  })
+  youtubePlayerVideoId = currentYoutubeVideoId.value
+}
+
+function rememberCurrentPlaybackTime() {
+  if (currentVideoPlatform.value !== 'YouTube' || !youtubePlayer) return
+
+  savePlaybackTime(youtubePlayer.getCurrentTime())
+}
+
+function pauseBilibiliPlayer() {
+  try {
+    videoIframeRef.value?.contentWindow?.postMessage({ command: 'pause' }, '*')
+    videoIframeRef.value?.contentWindow?.postMessage('pause', '*')
+  } catch {
+    // Bilibili does not expose a stable public control API for embeds.
+  }
+}
+
+function pauseCurrentPlayer() {
+  if (currentVideoPlatform.value === 'YouTube' && youtubePlayer) {
+    youtubePlayer.pauseVideo()
+    return
+  }
+
+  if (currentVideoPlatform.value === 'B站') {
+    pauseBilibiliPlayer()
+  }
+}
+
+function restoreCurrentPlaybackTime() {
+  if (currentVideoPlatform.value !== 'YouTube' || !youtubePlayer) return
+
+  const seconds = savedPlaybackSeconds.value[getPlaybackKey()]
+
+  if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+    youtubePlayer.seekTo(seconds, true)
+    youtubePlayer.pauseVideo()
+  }
+}
+
+function handleVideoIframeLoad() {
+  if (currentVideoPlatform.value === 'YouTube') {
+    void initializeYoutubePlayer()
+  }
+}
 
 const defaultNotes: Record<number, string> = {
   1: `本节重点
@@ -380,8 +708,20 @@ const defaultNotes: Record<number, string> = {
 }
 
 function getNoteKey() {
-  if (!selectedCourse.value) return ''
-  return getCourseNoteKey(selectedCourse.value.id, selectedLesson.value.id)
+  if (!activeNoteCourse.value || !activeNoteLesson.value) return ''
+  return getCourseNoteKey(activeNoteCourse.value.id, activeNoteLesson.value.id)
+}
+
+function getNoteKeyFor(course: Course, lesson: Lesson) {
+  return getCourseNoteKey(course.id, lesson.id)
+}
+
+function loadNote(course: Course, lesson: Lesson) {
+  return localStorage.getItem(getNoteKeyFor(course, lesson)) ?? defaultNotes[lesson.id] ?? ''
+}
+
+function hasSavedNote(course: Course, lesson: Lesson) {
+  return Boolean(localStorage.getItem(getNoteKeyFor(course, lesson))?.trim())
 }
 
 function getVideoKey() {
@@ -394,43 +734,10 @@ function loadCurrentVideo() {
   currentVideoUrl.value = key ? localStorage.getItem(key) ?? '' : ''
 }
 
-function saveCurrentVideo(videoUrl: string) {
-  const normalizedUrl = videoUrl.trim()
-  const key = getVideoKey()
-
-  if (!key) return
-
-  if (!normalizedUrl) {
-    removeCurrentVideo()
-    return
-  }
-
-  currentVideoUrl.value = normalizedUrl
-  localStorage.setItem(key, normalizedUrl)
-}
-
-function importVideo() {
-  const videoUrl = window.prompt('粘贴 B站或 YouTube 视频链接', currentVideoUrl.value)
-
-  if (videoUrl === null) return
-  saveCurrentVideo(videoUrl)
-}
-
-function removeCurrentVideo() {
-  const key = getVideoKey()
-
-  currentVideoUrl.value = ''
-  if (key) localStorage.removeItem(key)
-}
-
-function openCurrentVideo() {
-  if (!currentVideoUrl.value) return
-  window.open(currentVideoUrl.value, '_blank', 'noopener,noreferrer')
-}
-
 function setCourseVideo(course: Course, lessonId: number, videoUrl: string) {
-  const normalizedUrl = videoUrl.trim()
+  const normalizedUrl = normalizeVideoUrl(videoUrl)
   const key = getCourseVideoKey(course.id, lessonId)
+  const isCurrentLessonVideo = selectedCourse.value?.id === course.id && selectedLesson.value.id === lessonId
 
   if (normalizedUrl) {
     localStorage.setItem(key, normalizedUrl)
@@ -438,65 +745,100 @@ function setCourseVideo(course: Course, lessonId: number, videoUrl: string) {
     localStorage.removeItem(key)
   }
 
-  if (selectedCourse.value?.id === course.id && selectedLesson.value.id === lessonId) {
+  if (isCurrentLessonVideo) {
+    clearCurrentPlaybackTime()
+    destroyYoutubePlayer()
     currentVideoUrl.value = normalizedUrl
   }
 }
 
 function addCourse() {
-  const title = window.prompt('请输入课程名称')
+  isAddCourseDialogOpen.value = true
+  addCourseError.value = ''
+}
 
-  if (!title?.trim()) return
+function goToAddCourse() {
+  activeMenu.value = courseMenuName
+  currentPage.value = 'courseList'
+  addCourse()
+}
 
-  const videoUrl = window.prompt('粘贴 B站或 YouTube 视频链接（可选）')?.trim() ?? ''
+function closeAddCourseDialog() {
+  isAddCourseDialogOpen.value = false
+  addCourseError.value = ''
+  newCourseName.value = ''
+  newCourseLink.value = ''
+  newCourseCoverUrl.value = ''
+}
+
+function isValidUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url)
+    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function isImageCover(cover: string) {
+  return isValidUrl(cover)
+}
+
+function createCourse() {
+  const title = newCourseName.value.trim()
+  const videoUrl = newCourseLink.value.trim()
+  const coverUrl = newCourseCoverUrl.value.trim()
+  const courseLessons = cloneDefaultLessons()
+  const firstLesson = courseLessons[0]
+
+  if (!title) {
+    addCourseError.value = '请输入课程名称'
+    return
+  }
+
+  if (!videoUrl) {
+    addCourseError.value = '请输入课程链接'
+    return
+  }
+
+  if (coverUrl && !isValidUrl(coverUrl)) {
+    addCourseError.value = '课程封面需要填写 http 或 https 开头的 URL'
+    return
+  }
+
   const newCourse: Course = {
     id: courses.value.length > 0 ? Math.max(...courses.value.map((course) => course.id)) + 1 : 1,
-    title: title.trim(),
+    title,
     progress: 0,
     status: '未开始',
-    cover: '🎬',
-    theme: 'cyan'
+    cover: coverUrl || '🎬',
+    theme: coverUrl ? 'image' : 'cyan',
+    lessons: courseLessons
   }
 
   courses.value.push(newCourse)
   saveCourses()
   selectedCourse.value = newCourse
-  selectedLesson.value = lessons[0]
-  activeStudyTab.value = 'video'
+  selectedLesson.value = firstLesson
   currentPage.value = 'courseDetail'
 
-  setCourseVideo(newCourse, lessons[0].id, videoUrl)
-}
-
-function renameCourse(course: Course) {
-  const nextTitle = window.prompt('请输入新的课程名称', course.title)
-
-  if (!nextTitle?.trim()) return
-
-  course.title = nextTitle.trim()
-  saveCourses()
-}
-
-function changeCourseVideo(course: Course, lessonId = lessons[0].id) {
-  const currentUrl = localStorage.getItem(getCourseVideoKey(course.id, lessonId)) ?? ''
-  const nextVideoUrl = window.prompt('粘贴 B站或 YouTube 视频链接；留空将清除当前视频', currentUrl)
-
-  if (nextVideoUrl === null) return
-
-  setCourseVideo(course, lessonId, nextVideoUrl)
+  setCourseVideo(newCourse, firstLesson.id, videoUrl)
+  closeAddCourseDialog()
 }
 
 function deleteCourse(course: Course) {
-  const shouldDelete = window.confirm(`确定删除「${course.title}」吗？这会同时删除该课程所有课节的笔记和视频链接。`)
-
-  if (!shouldDelete) return
-
   courses.value = courses.value.filter((item) => item.id !== course.id)
-  lessons.forEach((lesson) => {
+  expandedNoteCourseIds.value = expandedNoteCourseIds.value.filter((courseId) => courseId !== course.id)
+  course.lessons.forEach((lesson) => {
     localStorage.removeItem(getCourseNoteKey(course.id, lesson.id))
     localStorage.removeItem(getCourseVideoKey(course.id, lesson.id))
   })
   saveCourses()
+
+  if (noteWorkspaceCourse.value?.id === course.id) {
+    noteWorkspaceCourse.value = courses.value[0] ?? null
+    noteWorkspaceLesson.value = noteWorkspaceCourse.value?.lessons[0] ?? null
+  }
 
   if (selectedCourse.value?.id === course.id) {
     selectedCourse.value = null
@@ -510,35 +852,122 @@ function deleteCourse(course: Course) {
 function manageCourse(course: Course, event?: MouseEvent) {
   event?.stopPropagation()
 
-  const action = window.prompt(`管理「${course.title}」\n1. 重命名\n2. 修改视频\n3. 删除`, '1')
+  const firstLesson = course.lessons[0] ?? cloneDefaultLessons()[0]
+  const lessonId = selectedCourse.value?.id === course.id ? selectedLesson.value.id : firstLesson.id
 
-  if (action === null) return
+  managedCourse.value = course
+  managedCourseName.value = course.title
+  managedCourseLink.value = localStorage.getItem(getCourseVideoKey(course.id, lessonId)) ?? ''
+  manageCourseError.value = ''
+  isDeleteCourseConfirming.value = false
+  isManageCourseDialogOpen.value = true
+}
 
-  const normalizedAction = action.trim()
+function closeManageCourseDialog() {
+  isManageCourseDialogOpen.value = false
+  managedCourse.value = null
+  managedCourseName.value = ''
+  managedCourseLink.value = ''
+  manageCourseError.value = ''
+  isDeleteCourseConfirming.value = false
+}
 
-  if (normalizedAction === '1' || normalizedAction === '重命名') {
-    renameCourse(course)
+function saveManagedCourse() {
+  if (!managedCourse.value) return
+
+  const title = managedCourseName.value.trim()
+
+  if (!title) {
+    manageCourseError.value = '请输入课程名称'
     return
   }
 
-  if (normalizedAction === '2' || normalizedAction === '修改视频') {
-    changeCourseVideo(course, selectedCourse.value?.id === course.id ? selectedLesson.value.id : lessons[0].id)
+  managedCourse.value.title = title
+  setCourseVideo(
+    managedCourse.value,
+    selectedCourse.value?.id === managedCourse.value.id ? selectedLesson.value.id : (managedCourse.value.lessons[0] ?? cloneDefaultLessons()[0]).id,
+    managedCourseLink.value
+  )
+  saveCourses()
+  closeManageCourseDialog()
+}
+
+function addLesson() {
+  if (!selectedCourse.value) return
+
+  isAddLessonDialogOpen.value = true
+  addLessonError.value = ''
+}
+
+function closeAddLessonDialog() {
+  isAddLessonDialogOpen.value = false
+  newLessonTitle.value = ''
+  newLessonVideoLink.value = ''
+  addLessonError.value = ''
+}
+
+function createLesson() {
+  if (!selectedCourse.value) return
+
+  const title = newLessonTitle.value.trim()
+  const videoUrl = newLessonVideoLink.value.trim()
+
+  if (!title) {
+    addLessonError.value = '请输入课节标题'
     return
   }
 
-  if (normalizedAction === '3' || normalizedAction === '删除') {
-    deleteCourse(course)
+  if (!videoUrl) {
+    addLessonError.value = '请输入课节视频链接'
+    return
   }
+
+  const nextLesson: Lesson = {
+    id: selectedCourse.value.lessons.length > 0 ? Math.max(...selectedCourse.value.lessons.map((lesson) => lesson.id)) + 1 : 1,
+    title,
+    status: '未开始',
+    time: ''
+  }
+
+  selectedCourse.value.lessons.push(nextLesson)
+  saveCourses()
+  setCourseVideo(selectedCourse.value, nextLesson.id, videoUrl)
+  selectLesson(nextLesson)
+  closeAddLessonDialog()
+}
+
+function confirmDeleteManagedCourse() {
+  if (!managedCourse.value) return
+
+  if (!isDeleteCourseConfirming.value) {
+    isDeleteCourseConfirming.value = true
+    manageCourseError.value = '再次点击删除课程，将同时删除该课程所有课节的笔记和视频链接。'
+    return
+  }
+
+  deleteCourse(managedCourse.value)
+  closeManageCourseDialog()
+}
+
+function normalizeVideoUrl(videoUrl: string) {
+  const normalizedUrl = videoUrl.trim().replace(/\s+/g, '')
+
+  if (/^(?:www\.)?(?:youtube\.com|youtu\.be|bilibili\.com|b23\.tv)\//i.test(normalizedUrl)) {
+    return `https://${normalizedUrl}`
+  }
+
+  return normalizedUrl
 }
 
 function getBilibiliBvid(videoUrl: string) {
-  const match = videoUrl.match(/(?:bilibili\.com\/video\/|\/)(BV[0-9A-Za-z]+)/i)
+  const normalizedUrl = normalizeVideoUrl(videoUrl)
+  const match = normalizedUrl.match(/(?:bilibili\.com\/video\/|\/)(BV[0-9A-Za-z]+)/i)
   return match?.[1]
 }
 
 function getYoutubeVideoId(videoUrl: string) {
   try {
-    const url = new URL(videoUrl)
+    const url = new URL(normalizeVideoUrl(videoUrl))
 
     if (url.hostname.includes('youtu.be')) {
       return url.pathname.split('/').filter(Boolean)[0]
@@ -564,13 +993,14 @@ function getVideoEmbedUrl(videoUrl: string) {
   const bvid = getBilibiliBvid(videoUrl)
 
   if (bvid) {
-    return `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&high_quality=1&danmaku=0`
+    return `https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bvid)}&page=1&high_quality=1&danmaku=0&autoplay=0`
   }
 
   const youtubeId = getYoutubeVideoId(videoUrl)
 
   if (youtubeId) {
-    return `https://www.youtube.com/embed/${encodeURIComponent(youtubeId)}`
+    const origin = encodeURIComponent(window.location.origin)
+    return `https://www.youtube.com/embed/${encodeURIComponent(youtubeId)}?enablejsapi=1&origin=${origin}`
   }
 
   return ''
@@ -578,20 +1008,20 @@ function getVideoEmbedUrl(videoUrl: string) {
 
 function getVideoPlatform(videoUrl: string) {
   if (!videoUrl) return ''
-  if (getBilibiliBvid(videoUrl) || videoUrl.includes('bilibili.com') || videoUrl.includes('b23.tv')) return 'B站'
+  const normalizedUrl = normalizeVideoUrl(videoUrl)
+
+  if (getBilibiliBvid(normalizedUrl) || normalizedUrl.includes('bilibili.com') || normalizedUrl.includes('b23.tv')) return 'B站'
   if (getYoutubeVideoId(videoUrl)) return 'YouTube'
   return '视频链接'
 }
 
 function loadCurrentNote() {
-  const key = getNoteKey()
-  const savedNote = key ? localStorage.getItem(key) : ''
-  const nextNote = savedNote ?? defaultNotes[selectedLesson.value.id] ?? ''
+  const nextNote = activeNoteCourse.value && activeNoteLesson.value ? loadNote(activeNoteCourse.value, activeNoteLesson.value) : ''
 
   shouldSkipNextAutoSave = nextNote !== currentNote.value
   currentNote.value = nextNote
   applyNoteToEditor(nextNote)
-  savedText.value = '已加载'
+  savedText.value = activeNoteCourse.value && activeNoteLesson.value ? '已加载' : '未选择笔记'
 }
 
 function applyNoteToEditor(markdown: string) {
@@ -629,7 +1059,7 @@ function saveCurrentNote(source: 'manual' | 'auto' = 'manual') {
 }
 
 function exportCurrentNote() {
-  if (!selectedCourse.value) return
+  if (!activeNoteCourse.value || !activeNoteLesson.value) return
 
   saveCurrentNote()
 
@@ -638,8 +1068,8 @@ function exportCurrentNote() {
   })
   const downloadUrl = URL.createObjectURL(markdownBlob)
   const downloadLink = document.createElement('a')
-  const safeCourseTitle = selectedCourse.value.title.replace(/[\\/:*?"<>|]/g, '-')
-  const safeLessonTitle = selectedLesson.value.title.replace(/[\\/:*?"<>|]/g, '-')
+  const safeCourseTitle = activeNoteCourse.value.title.replace(/[\\/:*?"<>|]/g, '-')
+  const safeLessonTitle = activeNoteLesson.value.title.replace(/[\\/:*?"<>|]/g, '-')
 
   downloadLink.href = downloadUrl
   downloadLink.download = `${safeCourseTitle}-${safeLessonTitle}-笔记.md`
@@ -647,15 +1077,304 @@ function exportCurrentNote() {
   URL.revokeObjectURL(downloadUrl)
 }
 
-function selectLesson(lesson: typeof lessons[number]) {
+function initializeNoteWorkspace() {
+  if (courses.value.length === 0) {
+    noteWorkspaceCourse.value = null
+    noteWorkspaceLesson.value = null
+    return
+  }
+
+  const preferredCourse = selectedCourse.value && courses.value.some((course) => course.id === selectedCourse.value?.id)
+    ? selectedCourse.value
+    : noteWorkspaceCourse.value && courses.value.some((course) => course.id === noteWorkspaceCourse.value?.id)
+      ? noteWorkspaceCourse.value
+      : courses.value[0]
+  const preferredLesson = preferredCourse.lessons.find((lesson) => lesson.id === selectedLesson.value.id)
+    ?? preferredCourse.lessons.find((lesson) => lesson.id === noteWorkspaceLesson.value?.id)
+    ?? preferredCourse.lessons[0]
+    ?? null
+
+  noteWorkspaceCourse.value = preferredCourse
+  noteWorkspaceLesson.value = preferredLesson
+  ensureNoteCourseExpanded(preferredCourse.id)
+}
+
+function selectNoteWorkspaceCourse(course: Course) {
+  toggleNoteCourseExpansion(course.id)
+
+  if (noteWorkspaceCourse.value?.id === course.id) return
+
+  saveCurrentNote()
+  noteWorkspaceCourse.value = course
+  noteWorkspaceLesson.value = course.lessons[0] ?? null
+  loadCurrentNote()
+}
+
+function selectNoteWorkspaceLesson(course: Course, lesson: Lesson) {
+  if (noteWorkspaceCourse.value?.id === course.id && noteWorkspaceLesson.value?.id === lesson.id) return
+
+  saveCurrentNote()
+  ensureNoteCourseExpanded(course.id)
+  noteWorkspaceCourse.value = course
+  noteWorkspaceLesson.value = lesson
+  loadCurrentNote()
+}
+
+function isNoteCourseExpanded(courseId: number) {
+  return expandedNoteCourseIds.value.includes(courseId)
+}
+
+function ensureNoteCourseExpanded(courseId: number) {
+  if (isNoteCourseExpanded(courseId)) return
+
+  expandedNoteCourseIds.value = [...expandedNoteCourseIds.value, courseId]
+}
+
+function toggleNoteCourseExpansion(courseId: number) {
+  expandedNoteCourseIds.value = isNoteCourseExpanded(courseId)
+    ? expandedNoteCourseIds.value.filter((id) => id !== courseId)
+    : [...expandedNoteCourseIds.value, courseId]
+}
+
+function toggleAllNoteFolders() {
+  expandedNoteCourseIds.value = areAllNoteCoursesExpanded.value
+    ? []
+    : courses.value.map((course) => course.id)
+}
+
+async function revealCurrentNoteInTree() {
+  if (!noteWorkspaceCourse.value || !noteWorkspaceLesson.value) return
+
+  ensureNoteCourseExpanded(noteWorkspaceCourse.value.id)
+  await nextTick()
+
+  const currentNoteButton = notesFolderListRef.value?.querySelector<HTMLElement>(
+    `[data-note-tree-item="${noteWorkspaceCourse.value.id}-${noteWorkspaceLesson.value.id}"]`
+  )
+
+  currentNoteButton?.scrollIntoView({
+    block: 'nearest'
+  })
+}
+
+function toggleAutoRevealCurrentNote() {
+  autoRevealCurrentNote.value = !autoRevealCurrentNote.value
+
+  if (autoRevealCurrentNote.value) {
+    void revealCurrentNoteInTree()
+  }
+}
+
+function openCreateWorkspaceNoteDialog() {
+  if (!noteWorkspaceCourse.value) return
+
+  createWorkspaceNoteError.value = ''
+  newWorkspaceNoteTitle.value = ''
+  isCreateWorkspaceNoteDialogOpen.value = true
+}
+
+function closeCreateWorkspaceNoteDialog() {
+  isCreateWorkspaceNoteDialogOpen.value = false
+  newWorkspaceNoteTitle.value = ''
+  createWorkspaceNoteError.value = ''
+}
+
+function createWorkspaceNote() {
+  const course = noteWorkspaceCourse.value
+  const title = newWorkspaceNoteTitle.value.trim()
+
+  if (!course) return
+
+  if (!title) {
+    createWorkspaceNoteError.value = '请输入笔记名称'
+    return
+  }
+
+  const nextLesson: Lesson = {
+    id: course.lessons.length > 0 ? Math.max(...course.lessons.map((lesson) => lesson.id)) + 1 : 1,
+    title,
+    status: '未开始',
+    time: ''
+  }
+
+  course.lessons.push(nextLesson)
+  localStorage.setItem(getNoteKeyFor(course, nextLesson), '')
+  saveCourses()
+  ensureNoteCourseExpanded(course.id)
+  noteWorkspaceCourse.value = course
+  noteWorkspaceLesson.value = nextLesson
+  loadCurrentNote()
+  closeCreateWorkspaceNoteDialog()
+}
+
+function openCreateWorkspaceFolderDialog() {
+  createWorkspaceFolderError.value = ''
+  newWorkspaceFolderTitle.value = ''
+  isCreateWorkspaceFolderDialogOpen.value = true
+}
+
+function closeCreateWorkspaceFolderDialog() {
+  isCreateWorkspaceFolderDialogOpen.value = false
+  newWorkspaceFolderTitle.value = ''
+  createWorkspaceFolderError.value = ''
+}
+
+function createWorkspaceFolder() {
+  const title = newWorkspaceFolderTitle.value.trim()
+
+  if (!title) {
+    createWorkspaceFolderError.value = '请输入文件夹名称'
+    return
+  }
+
+  const firstNote: Lesson = {
+    id: 1,
+    title: '未命名笔记',
+    status: '未开始',
+    time: ''
+  }
+  const newFolder: Course = {
+    id: courses.value.length > 0 ? Math.max(...courses.value.map((course) => course.id)) + 1 : 1,
+    title,
+    progress: 0,
+    status: '未开始',
+    cover: '📁',
+    theme: 'gray',
+    lessons: [firstNote]
+  }
+
+  courses.value.push(newFolder)
+  localStorage.setItem(getNoteKeyFor(newFolder, firstNote), '')
+  saveCourses()
+  ensureNoteCourseExpanded(newFolder.id)
+  noteWorkspaceCourse.value = newFolder
+  noteWorkspaceLesson.value = firstNote
+  loadCurrentNote()
+  closeCreateWorkspaceFolderDialog()
+}
+
+function selectLesson(lesson: Lesson) {
+  if (selectedLesson.value.id === lesson.id) return
+
+  saveCurrentNote()
+  rememberCurrentPlaybackTime()
+  pauseCurrentPlayer()
+
+  destroyYoutubePlayer()
   selectedLesson.value = lesson
 }
 
+function getStudySplitBounds() {
+  const workspace = studyWorkspaceRef.value
+
+  if (!workspace) {
+    return {
+      minRatio: 0.32,
+      maxRatio: 0.78,
+      availableHeight: 1
+    }
+  }
+
+  const availableHeight = Math.max(workspace.clientHeight - STUDY_SPLIT_HANDLE_HEIGHT, 1)
+  const minRatio = Math.max(0.32, STUDY_VIDEO_MIN_HEIGHT / availableHeight)
+  const maxRatio = Math.min(0.78, 1 - STUDY_NOTES_MIN_HEIGHT / availableHeight)
+
+  return {
+    minRatio,
+    maxRatio: Math.max(minRatio, maxRatio),
+    availableHeight
+  }
+}
+
+function updateStudySplitFromClientY(clientY: number) {
+  const workspace = studyWorkspaceRef.value
+
+  if (!workspace) return
+
+  const rect = workspace.getBoundingClientRect()
+  const { minRatio, maxRatio, availableHeight } = getStudySplitBounds()
+  const rawRatio = (clientY - rect.top) / availableHeight
+  studySplitRatio.value = Math.min(maxRatio, Math.max(minRatio, rawRatio))
+}
+
+function handleStudySplitPointerMove(event: PointerEvent) {
+  if (!isResizingStudySplit.value) return
+  if (activeStudySplitPointerId.value !== null && event.pointerId !== activeStudySplitPointerId.value) return
+
+  if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) {
+    stopStudySplitResize()
+    return
+  }
+
+  event.preventDefault()
+  updateStudySplitFromClientY(event.clientY)
+}
+
+function stopStudySplitResize() {
+  if (!isResizingStudySplit.value) return
+
+  isResizingStudySplit.value = false
+  activeStudySplitPointerId.value = null
+  saveStudySplitRatio()
+  window.removeEventListener('pointermove', handleStudySplitPointerMove)
+  window.removeEventListener('pointerup', stopStudySplitResize)
+  window.removeEventListener('pointercancel', stopStudySplitResize)
+  window.removeEventListener('blur', stopStudySplitResize)
+}
+
+function startStudySplitResize(event: PointerEvent) {
+  if (window.matchMedia('(max-width: 820px)').matches) return
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+
+  event.preventDefault()
+  isResizingStudySplit.value = true
+  activeStudySplitPointerId.value = event.pointerId
+  updateStudySplitFromClientY(event.clientY)
+  window.addEventListener('pointermove', handleStudySplitPointerMove)
+  window.addEventListener('pointerup', stopStudySplitResize)
+  window.addEventListener('pointercancel', stopStudySplitResize)
+  window.addEventListener('blur', stopStudySplitResize)
+}
+
+function resizeStudySplitByKeyboard(event: KeyboardEvent) {
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+
+  event.preventDefault()
+  const { minRatio, maxRatio } = getStudySplitBounds()
+
+  if (event.key === 'Home') {
+    studySplitRatio.value = minRatio
+  } else if (event.key === 'End') {
+    studySplitRatio.value = maxRatio
+  } else {
+    const delta = event.key === 'ArrowUp' ? -0.02 : 0.02
+    studySplitRatio.value = Math.min(maxRatio, Math.max(minRatio, studySplitRatio.value + delta))
+  }
+
+  saveStudySplitRatio()
+}
+
 watch([selectedCourse, selectedLesson], () => {
-  loadCurrentNote()
+  if (activeMenu.value !== noteMenuName) {
+    loadCurrentNote()
+  }
   loadCurrentVideo()
 }, {
   immediate: true
+})
+
+watch([noteWorkspaceCourse, noteWorkspaceLesson], () => {
+  if (activeMenu.value === noteMenuName) {
+    loadCurrentNote()
+
+    if (autoRevealCurrentNote.value) {
+      void revealCurrentNoteInTree()
+    }
+  }
+})
+
+watch(currentVideoEmbedUrl, () => {
+  destroyYoutubePlayer()
 })
 
 watch(currentNote, () => {
@@ -677,16 +1396,29 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleShortcutKeydown)
+  window.removeEventListener('pointermove', handleStudySplitPointerMove)
+  window.removeEventListener('pointerup', stopStudySplitResize)
+  window.removeEventListener('pointercancel', stopStudySplitResize)
+  window.removeEventListener('blur', stopStudySplitResize)
   clearTimeout(autoSaveTimer)
+  destroyYoutubePlayer()
   syncCurrentNoteFromEditor()
   noteEditor.value?.destroy()
 })
 
 function openCourseDetail(course: Course) {
   selectedCourse.value = course
+  selectedLesson.value = noteWorkspaceCourse.value?.id === course.id && noteWorkspaceLesson.value
+    ? noteWorkspaceLesson.value
+    : course.lessons[0] ?? cloneDefaultLessons()[0]
   currentPage.value = 'courseDetail'
 }
 function backToCourseList(){
+  rememberCurrentPlaybackTime()
+  pauseCurrentPlayer()
+
+  destroyYoutubePlayer()
+  fullscreenMode.value = null
   currentPage.value = 'courseList'
   selectedCourse.value = null
 }
@@ -704,7 +1436,8 @@ function getStatusClass(status: string) {
       'fullscreen-active': fullscreenMode,
       'fullscreen-video': fullscreenMode === 'video',
       'fullscreen-notes': fullscreenMode === 'notes',
-      'sidebar-collapsed': isSidebarCollapsed
+      'sidebar-collapsed': isSidebarCollapsed,
+      'course-study-active': currentPage === 'courseDetail' && activeMenu === courseMenuName
     }"
   >
     <header class="top-bar">
@@ -734,13 +1467,6 @@ function getStatusClass(status: string) {
         <input placeholder="搜索课程、笔记、知识点..." />
         <span class="shortcut">⌘ K</span>
       </div>
-
-      <div class="user-area">
-        <button class="icon-button">🔔</button>
-        <div class="avatar">👨‍💻</div>
-        <span class="username">学习者</span>
-        <span class="arrow">▾</span>
-      </div>
     </header>
 
     <div class="layout">
@@ -758,14 +1484,6 @@ function getStatusClass(status: string) {
   </button>
         </nav>
 
-        <div class="tip-card">
-          <div class="tip-title">
-            <span>💡</span>
-            <span>学习小贴士</span>
-            <span>›</span>
-          </div>
-          <p>坚持每日学习，点滴进步！</p>
-        </div>
       </aside>
 
       <main class="content">
@@ -813,6 +1531,148 @@ function getStatusClass(status: string) {
           </p>
         </section>
 
+        <section v-else-if="activeMenu === noteMenuName" class="notes-workspace">
+          <div v-if="courses.length === 0" class="notes-empty-state">
+            <h1>笔记管理</h1>
+            <p>先添加课程后开始整理每个小节的笔记。</p>
+            <button class="add-button" @click="goToAddCourse">
+              <span>＋</span>
+              添加课程
+            </button>
+          </div>
+
+          <template v-else>
+            <aside class="notes-folder-panel">
+              <div class="notes-folder-toolbar">
+                <h1>笔记管理</h1>
+                <span>{{ courses.length }} 门课程</span>
+              </div>
+
+              <div class="notes-tree-actions" role="toolbar" aria-label="笔记管理工具栏">
+                <button
+                  type="button"
+                  class="notes-tree-action-button"
+                  title="新建笔记"
+                  aria-label="新建笔记"
+                  @click="openCreateWorkspaceNoteDialog"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 20h4l10.5-10.5a2.8 2.8 0 0 0-4-4L4 16v4Z"></path>
+                    <path d="m13.5 6.5 4 4"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="notes-tree-action-button"
+                  title="新建文件夹"
+                  aria-label="新建文件夹"
+                  @click="openCreateWorkspaceFolderDialog"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M3.5 18.5V7.8A1.8 1.8 0 0 1 5.3 6h4.2l2 2h7.2a1.8 1.8 0 0 1 1.8 1.8v8.7a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8Z"></path>
+                    <path d="M12 11v6"></path>
+                    <path d="M9 14h6"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="notes-tree-action-button"
+                  :class="{ active: autoRevealCurrentNote }"
+                  :title="autoRevealCurrentNote ? '自动显示当前文件：已开启' : '自动显示当前文件：已关闭'"
+                  :aria-label="autoRevealCurrentNote ? '关闭自动显示当前文件' : '开启自动显示当前文件'"
+                  :aria-pressed="autoRevealCurrentNote"
+                  @click="toggleAutoRevealCurrentNote"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 6h7"></path>
+                    <path d="M4 12h11"></path>
+                    <path d="M4 18h7"></path>
+                    <path d="m14 7 4 5-4 5"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="notes-tree-action-button"
+                  :title="areAllNoteCoursesExpanded ? '全部折叠' : '全部展开'"
+                  :aria-label="areAllNoteCoursesExpanded ? '全部折叠' : '全部展开'"
+                  @click="toggleAllNoteFolders"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m7 9 5-5 5 5"></path>
+                    <path d="m7 15 5 5 5-5"></path>
+                  </svg>
+                </button>
+              </div>
+
+              <div ref="notesFolderListRef" class="notes-folder-list">
+                <section
+                  v-for="course in courses"
+                  :key="course.id"
+                  class="notes-folder"
+                >
+                  <button
+                    type="button"
+                    class="notes-folder-button"
+                    :class="{ active: noteWorkspaceCourse?.id === course.id }"
+                    @click="selectNoteWorkspaceCourse(course)"
+                  >
+                    <span>📁</span>
+                    <strong>{{ course.title }}</strong>
+                    <small>{{ course.lessons.length }} 节</small>
+                  </button>
+
+                  <Transition name="notes-lesson-expand">
+                    <div v-if="isNoteCourseExpanded(course.id)" class="notes-lesson-list-shell">
+                      <div class="notes-lesson-list">
+                        <p v-if="course.lessons.length === 0" class="notes-empty-folder">该课程暂无课节</p>
+                        <button
+                          v-for="lesson in course.lessons"
+                          :key="lesson.id"
+                          type="button"
+                          class="notes-lesson-button"
+                          :data-note-tree-item="`${course.id}-${lesson.id}`"
+                          :class="{ active: noteWorkspaceCourse?.id === course.id && noteWorkspaceLesson?.id === lesson.id }"
+                          @click="selectNoteWorkspaceLesson(course, lesson)"
+                        >
+                          <span>📄</span>
+                          <span>{{ lesson.id }}. {{ lesson.title }}</span>
+                          <small>{{ hasSavedNote(course, lesson) ? '有笔记' : '空白' }}</small>
+                        </button>
+                      </div>
+                    </div>
+                  </Transition>
+                </section>
+              </div>
+            </aside>
+
+            <section class="notes-editor-panel">
+              <div v-if="noteWorkspaceCourse && noteWorkspaceLesson" class="notes-editor-shell">
+                <div class="notes-editor-topbar">
+                  <div>
+                    <p>{{ noteWorkspaceCourse.title }} / {{ noteWorkspaceLesson.title }}</p>
+                    <h1>{{ noteWorkspaceLesson.title }}</h1>
+                  </div>
+
+                  <div class="note-actions">
+                    <span>{{ savedText }}</span>
+                    <button @click="saveCurrentNote()">保存</button>
+                    <button class="secondary" @click="exportCurrentNote">导出</button>
+                  </div>
+                </div>
+
+                <div class="wysiwyg-note-editor notes-manager-editor">
+                  <EditorContent class="note-editor-content" :editor="noteEditor" />
+                </div>
+              </div>
+
+              <div v-else class="notes-empty-state inline">
+                <h1>选择一节课</h1>
+                <p>从左侧课程文件夹中选择小节后开始编辑笔记。</p>
+              </div>
+            </section>
+          </template>
+        </section>
+
         <div v-else-if="currentPage === 'courseList'">
         <section class="page-header">
           <div>
@@ -827,191 +1687,188 @@ function getStatusClass(status: string) {
         </section>
       </div>
       <div v-else-if="selectedCourse" class="course-detail-page">
-  <div class="breadcrumb">
-    <button class="back-button" @click="backToCourseList">返回课程管理</button>
-    <span>/</span>
-    <span>{{ selectedCourse.title }}</span>
-  </div>
-
-  <section class="detail-header">
-    <div>
-      <div class="title-row">
-        <h1>{{ selectedCourse.title }}</h1>
-        <span :class="getStatusClass(selectedCourse.status)">
-          {{ selectedCourse.status }}
-        </span>
-      </div>
-
-      <div class="detail-progress-row">
-        <span>课程进度：{{ selectedCourse.progress }}%</span>
-        <div class="detail-progress-bar">
-          <div
-            class="detail-progress-inner"
-            :style="{ width: selectedCourse.progress + '%' }"
-          ></div>
-        </div>
-        <span>已学 15 / 24 课时</span>
-      </div>
-    </div>
-
-    <button class="detail-button" @click="manageCourse(selectedCourse)">管理课程</button>
-  </section>
-
-  <section class="study-layout">
-    <aside class="lesson-panel">
-      <div class="lesson-header">
-        <h2>课程目录</h2>
-        <button>‹ 收起</button>
-      </div>
-
-      <div class="lesson-list">
-        <button
-          v-for="lesson in lessons"
-          :key="lesson.id"
-          class="lesson-item"
-          :class="{ active: selectedLesson.id === lesson.id }"
-          @click="selectLesson(lesson)"
+        <section
+          ref="studyWorkspaceRef"
+          class="course-study-workspace"
+          :class="{
+            resizing: isResizingStudySplit,
+            'lesson-panel-collapsed': isLessonPanelCollapsed,
+            'note-position-right': studyNotePosition === 'right'
+          }"
+          :style="studyWorkspaceStyle"
         >
-          <div>
-            <strong>{{ lesson.id }}. {{ lesson.title }}</strong>
-            <p v-if="lesson.status === '正在学习'">
-              正在学习 · {{ lesson.time }}
-            </p>
-          </div>
+          <aside v-if="!isLessonPanelCollapsed" class="lesson-panel">
+            <div class="lesson-header">
+              <h2>课程目录</h2>
+              <div class="lesson-header-actions">
+                <button type="button" @click="addLesson">+ 添加课节</button>
+                <button type="button" @click="toggleLessonPanel">收起</button>
+              </div>
+            </div>
 
-          <span v-if="lesson.status === '已完成'" class="lesson-done">✓ 已完成</span>
-          <span v-else-if="lesson.status === '正在学习'" class="lesson-playing">▶</span>
-          <span v-else class="lesson-pending">○ 未开始</span>
-        </button>
+            <div class="lesson-list">
+              <button
+                v-for="lesson in currentLessons"
+                :key="lesson.id"
+                class="lesson-item"
+                :class="{ active: selectedLesson.id === lesson.id }"
+                @click="selectLesson(lesson)"
+              >
+                <div>
+                  <strong>{{ lesson.id }}. {{ lesson.title }}</strong>
+                  <p v-if="lesson.status === '正在学习'">
+                    正在学习 · {{ lesson.time }}
+                  </p>
+                </div>
+              </button>
+            </div>
+          </aside>
+
+          <button
+            v-else
+            class="lesson-expand-button"
+            type="button"
+            @click="toggleLessonPanel"
+          >
+            展开目录
+          </button>
+
+          <section class="video-study-card">
+            <div v-if="currentVideoUrl" class="video-player-card">
+              <iframe
+                v-if="currentVideoEmbedUrl"
+                ref="videoIframeRef"
+                class="video-iframe"
+                :src="currentVideoEmbedUrl"
+                title="课程视频播放器"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowfullscreen
+                @load="handleVideoIframeLoad"
+              ></iframe>
+
+              <div v-else class="video-link-fallback">
+                <img
+                  v-if="isImageCover(selectedCourse.cover)"
+                  class="video-cover-image"
+                  :src="selectedCourse.cover"
+                  :alt="selectedCourse.title"
+                />
+                <div v-else class="video-cover-icon">{{ selectedCourse.cover }}</div>
+                <h3>已绑定{{ currentVideoPlatform }}</h3>
+                <p>这个链接暂时不能直接嵌入播放，可以打开原链接学习。</p>
+              </div>
+
+            </div>
+
+            <div v-else class="fake-video">
+              <img
+                v-if="isImageCover(selectedCourse.cover)"
+                class="video-cover-image"
+                :src="selectedCourse.cover"
+                :alt="selectedCourse.title"
+              />
+              <div v-else class="video-cover-icon">{{ selectedCourse.cover }}</div>
+              <h3>{{ selectedLesson.title }}</h3>
+              <p>{{ selectedCourse.title }} 系列课程</p>
+
+              <div class="fake-video-control">
+                <span>▶</span>
+                <span>🔊</span>
+                <span>02:18 / 18:24</span>
+                <span>1.0x</span>
+                <span>超清</span>
+                <span>⛶</span>
+              </div>
+            </div>
+          </section>
+
+          <button
+            class="study-resize-handle"
+            type="button"
+            aria-label="调整视频区和笔记区高度"
+            aria-orientation="horizontal"
+            @pointerdown="startStudySplitResize"
+            @keydown="resizeStudySplitByKeyboard"
+          >
+            <span></span>
+          </button>
+
+          <section class="note-card">
+            <div class="note-header">
+              <span class="note-save-status">{{savedText}}</span>
+              <div class="note-actions">
+                <button
+                  type="button"
+                  class="secondary"
+                  :title="studyNotePosition === 'bottom' ? '移到右侧' : '移到下方'"
+                  :aria-label="studyNotePosition === 'bottom' ? '将笔记移到右侧' : '将笔记移到下方'"
+                  @click="toggleStudyNotePosition"
+                >
+                  <svg v-if="studyNotePosition === 'bottom'" viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="3" y="3" width="14" height="14" rx="2"></rect>
+                    <path d="M12 3v14"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="3" y="3" width="14" height="14" rx="2"></rect>
+                    <path d="M3 12h14"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  :title="fullscreenMode === 'notes' ? '退出全屏' : '全屏'"
+                  :aria-label="fullscreenMode === 'notes' ? '退出笔记全屏' : '笔记全屏'"
+                  @click="toggleStudyFullscreen('notes')"
+                >
+                  <svg v-if="fullscreenMode !== 'notes'" viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M7 3H3v4"></path>
+                    <path d="M13 3h4v4"></path>
+                    <path d="M17 13v4h-4"></path>
+                    <path d="M7 17H3v-4"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M8 3v5H3"></path>
+                    <path d="M12 3v5h5"></path>
+                    <path d="M17 12h-5v5"></path>
+                    <path d="M8 17v-5H3"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="save-action"
+                  title="保存"
+                  aria-label="保存笔记"
+                  @click="saveCurrentNote()"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3h8.2L16 5.3v10.2a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 15.5v-11Z"></path>
+                    <path d="M7 3v5h6V3"></path>
+                    <path d="M7 17v-5h6v5"></path>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  title="导出"
+                  aria-label="导出笔记"
+                  @click="exportCurrentNote"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M10 3v9"></path>
+                    <path d="m6.5 8.5 3.5 3.5 3.5-3.5"></path>
+                    <path d="M4 16h12"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="wysiwyg-note-editor">
+              <EditorContent class="note-editor-content" :editor="noteEditor" />
+            </div>
+          </section>
+        </section>
       </div>
-    </aside>
-
-    <section class="study-main-panel">
-      <div class="study-tabs" role="tablist" aria-label="学习视图">
-        <button
-          type="button"
-          :class="{ active: activeStudyTab === 'video' }"
-          @click="activeStudyTab = 'video'"
-        >
-          看课
-        </button>
-        <button
-          type="button"
-          :class="{ active: activeStudyTab === 'notes' }"
-          @click="activeStudyTab = 'notes'"
-        >
-          记笔记
-        </button>
-        <button
-          type="button"
-          :class="{ active: activeStudyTab === 'ai' }"
-          @click="activeStudyTab = 'ai'"
-        >
-          AI助手
-        </button>
-      </div>
-
-    <section v-if="activeStudyTab === 'video'" class="video-study-card">
-      <div class="study-card-header">
-        <h2>第{{ selectedLesson.id }}课 {{ selectedLesson.title }}</h2>
-        <button class="fullscreen-button" @click="toggleStudyFullscreen('video')">
-          {{ fullscreenMode === 'video' ? '退出全屏' : '全屏' }}
-        </button>
-      </div>
-
-      <div v-if="currentVideoUrl" class="video-player-card">
-        <iframe
-          v-if="currentVideoEmbedUrl"
-          class="video-iframe"
-          :src="currentVideoEmbedUrl"
-          title="课程视频播放器"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowfullscreen
-        ></iframe>
-
-        <div v-else class="video-link-fallback">
-          <div class="video-cover-icon">{{ selectedCourse.cover }}</div>
-          <h3>已绑定{{ currentVideoPlatform }}</h3>
-          <p>这个链接暂时不能直接嵌入播放，可以打开原链接学习。</p>
-        </div>
-
-        <div class="video-source-bar">
-          <span>{{ currentVideoPlatform }}</span>
-          <button @click="openCurrentVideo">打开原链接</button>
-          <button @click="importVideo">更换</button>
-          <button class="danger" @click="removeCurrentVideo">移除</button>
-        </div>
-      </div>
-
-      <div v-else class="fake-video">
-        <div class="video-cover-icon">{{ selectedCourse.cover }}</div>
-        <h3>{{ selectedLesson.title }}</h3>
-        <p>{{ selectedCourse.title }} 系列课程</p>
-
-        <div class="fake-video-control">
-          <span>▶</span>
-          <span>🔊</span>
-          <span>02:18 / 18:24</span>
-          <span>1.0x</span>
-          <span>超清</span>
-          <span>⛶</span>
-        </div>
-      </div>
-
-      <p class="lesson-desc">
-        本节课我们将学习 {{ selectedLesson.title }} 的核心内容，并记录关键知识点。
-      </p>
-
-      <div class="lesson-actions">
-        <button class="prev-button">← 上一节</button>
-
-        <div class="mini-progress">
-          <span>课程进度</span>
-          <div class="mini-progress-bar">
-            <div class="mini-progress-inner"></div>
-          </div>
-        </div>
-
-        <button class="next-button">下一节 →</button>
-      </div>
-    </section>
-
-      <section v-else-if="activeStudyTab === 'notes'" class="note-card">
-        <div class="note-header">
-          <h2>课堂笔记</h2>
-          <span>{{savedText}}</span>
-          <div class="note-actions">
-            <button class="secondary" @click="toggleStudyFullscreen('notes')">
-              {{ fullscreenMode === 'notes' ? '退出全屏' : '全屏' }}
-            </button>
-            <button @click="saveCurrentNote()">保存</button>
-            <button class="secondary" @click="exportCurrentNote">导出</button>
-          </div>
-        </div>
-
-        <div class="wysiwyg-note-editor">
-          <EditorContent :editor="noteEditor" />
-        </div>
-      </section>
-
-      <section v-else class="ai-card">
-        <div class="ai-title">
-          <div class="ai-icon">✦</div>
-          <div>
-            <h2>AI学习助手</h2>
-            <p>基于本节内容，为你提供智能学习支持</p>
-          </div>
-        </div>
-
-        <div class="ai-actions">
-          <button>✨ AI总结本节</button>
-          <button>☷ 提炼重点</button>
-        </div>
-      </section>
-    </section>
-  </section>
-</div>
-        <section v-if="activeMenu !== settingsMenuName && currentPage === 'courseList' && courses.length > 0" class="course-grid">
+        <section v-if="activeMenu !== settingsMenuName && activeMenu !== noteMenuName && currentPage === 'courseList' && courses.length > 0" class="course-grid">
           <article
             v-for="course in courses"
             :key="course.id"
@@ -1019,7 +1876,8 @@ function getStatusClass(status: string) {
             @click="openCourseDetail(course)"
           >
             <div class="course-cover" :class="course.theme">
-              {{ course.cover }}
+              <img v-if="isImageCover(course.cover)" :src="course.cover" :alt="course.title" />
+              <span v-else>{{ course.cover }}</span>
             </div>
 
             <div class="course-info">
@@ -1048,6 +1906,243 @@ function getStatusClass(status: string) {
         </section>
       </main>
     </div>
+
+    <div
+      v-if="isAddCourseDialogOpen"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="closeAddCourseDialog"
+    >
+      <form class="add-course-dialog" @submit.prevent="createCourse">
+        <div class="dialog-header">
+          <div>
+            <h2>添加课程</h2>
+            <p>填写课程信息后，会自动进入第一节课。</p>
+          </div>
+          <button
+            class="dialog-close-button"
+            type="button"
+            aria-label="关闭"
+            @click="closeAddCourseDialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <label class="field-group">
+          <span>课程名称</span>
+          <input v-model="newCourseName" type="text" autocomplete="off" placeholder="例如：Python 入门" />
+        </label>
+
+        <label class="field-group">
+          <span>课程链接（B 站或 YouTube）</span>
+          <input v-model="newCourseLink" type="text" inputmode="url" autocomplete="off" placeholder="粘贴 YouTube 或 B 站视频链接" />
+        </label>
+
+        <label class="field-group">
+          <span>课程封面（url 格式，可选）</span>
+          <input v-model="newCourseCoverUrl" type="url" autocomplete="off" placeholder="https://..." />
+        </label>
+
+        <div v-if="newCourseCoverUrl.trim()" class="cover-preview">
+          <img
+            v-if="isImageCover(newCourseCoverUrl.trim())"
+            :src="newCourseCoverUrl.trim()"
+            alt="课程封面预览"
+          />
+          <span v-else>封面 URL 格式不正确</span>
+        </div>
+
+        <p v-if="addCourseError" class="dialog-error">{{ addCourseError }}</p>
+
+        <div class="dialog-actions">
+          <button class="dialog-secondary-button" type="button" @click="closeAddCourseDialog">取消</button>
+          <button class="dialog-primary-button" type="submit">添加课程</button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      v-if="isCreateWorkspaceNoteDialogOpen"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="closeCreateWorkspaceNoteDialog"
+    >
+      <form class="add-course-dialog" @submit.prevent="createWorkspaceNote">
+        <div class="dialog-header">
+          <div>
+            <h2>新建笔记</h2>
+            <p>将在当前文件夹下创建一条新的笔记。</p>
+          </div>
+          <button
+            class="dialog-close-button"
+            type="button"
+            aria-label="关闭"
+            @click="closeCreateWorkspaceNoteDialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <label class="field-group">
+          笔记名称
+          <input
+            v-model="newWorkspaceNoteTitle"
+            type="text"
+            placeholder="例如：Vue 生命周期"
+            autofocus
+          />
+        </label>
+
+        <p class="dialog-error">{{ createWorkspaceNoteError }}</p>
+
+        <div class="dialog-actions">
+          <button class="dialog-secondary-button" type="button" @click="closeCreateWorkspaceNoteDialog">
+            取消
+          </button>
+          <button class="dialog-primary-button" type="submit">
+            创建笔记
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      v-if="isCreateWorkspaceFolderDialogOpen"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="closeCreateWorkspaceFolderDialog"
+    >
+      <form class="add-course-dialog" @submit.prevent="createWorkspaceFolder">
+        <div class="dialog-header">
+          <div>
+            <h2>新建文件夹</h2>
+            <p>会先附带一条空白笔记，方便你马上开始整理。</p>
+          </div>
+          <button
+            class="dialog-close-button"
+            type="button"
+            aria-label="关闭"
+            @click="closeCreateWorkspaceFolderDialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <label class="field-group">
+          文件夹名称
+          <input
+            v-model="newWorkspaceFolderTitle"
+            type="text"
+            placeholder="例如：面试"
+            autofocus
+          />
+        </label>
+
+        <p class="dialog-error">{{ createWorkspaceFolderError }}</p>
+
+        <div class="dialog-actions">
+          <button class="dialog-secondary-button" type="button" @click="closeCreateWorkspaceFolderDialog">
+            取消
+          </button>
+          <button class="dialog-primary-button" type="submit">
+            创建文件夹
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      v-if="isManageCourseDialogOpen && managedCourse"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="closeManageCourseDialog"
+    >
+      <form class="add-course-dialog manage-course-dialog" @submit.prevent="saveManagedCourse">
+        <div class="dialog-header">
+          <div>
+            <h2>管理课程</h2>
+            <p>{{ managedCourse.title }}</p>
+          </div>
+          <button
+            class="dialog-close-button"
+            type="button"
+            aria-label="关闭"
+            @click="closeManageCourseDialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <label class="field-group">
+          <span>课程名称</span>
+          <input v-model="managedCourseName" type="text" autocomplete="off" />
+        </label>
+
+        <label class="field-group">
+          <span>课程链接（B 站或 YouTube）</span>
+          <input v-model="managedCourseLink" type="text" inputmode="url" autocomplete="off" placeholder="粘贴 YouTube 或 B 站视频链接" />
+        </label>
+
+        <p v-if="manageCourseError" class="dialog-error">{{ manageCourseError }}</p>
+
+        <div class="manage-danger-zone">
+          <button
+            class="dialog-danger-button"
+            type="button"
+            @click="confirmDeleteManagedCourse"
+          >
+            {{ isDeleteCourseConfirming ? '确认删除课程' : '删除课程' }}
+          </button>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="dialog-secondary-button" type="button" @click="closeManageCourseDialog">取消</button>
+          <button class="dialog-primary-button" type="submit">保存修改</button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      v-if="isAddLessonDialogOpen && selectedCourse"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="closeAddLessonDialog"
+    >
+      <form class="add-course-dialog" @submit.prevent="createLesson">
+        <div class="dialog-header">
+          <div>
+            <h2>添加课节</h2>
+            <p>{{ selectedCourse.title }}</p>
+          </div>
+          <button
+            class="dialog-close-button"
+            type="button"
+            aria-label="关闭"
+            @click="closeAddLessonDialog"
+          >
+            ×
+          </button>
+        </div>
+
+        <label class="field-group">
+          <span>课节标题</span>
+          <input v-model="newLessonTitle" type="text" autocomplete="off" placeholder="例如：数组与对象" />
+        </label>
+
+        <label class="field-group">
+          <span>视频链接（B 站或 YouTube）</span>
+          <input v-model="newLessonVideoLink" type="text" inputmode="url" autocomplete="off" placeholder="粘贴 YouTube 或 B 站视频链接" />
+        </label>
+
+        <p v-if="addLessonError" class="dialog-error">{{ addLessonError }}</p>
+
+        <div class="dialog-actions">
+          <button class="dialog-secondary-button" type="button" @click="closeAddLessonDialog">取消</button>
+          <button class="dialog-primary-button" type="submit">添加课节</button>
+        </div>
+      </form>
+    </div>
   </div>
 </template>
 
@@ -1056,6 +2151,9 @@ function getStatusClass(status: string) {
   width: 100vw;
   height: 100vh;
   min-width: 0;
+  --shell-padding: 16px;
+  --panel-gap: 10px;
+  --panel-padding: 14px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1066,7 +2164,7 @@ function getStatusClass(status: string) {
   position: relative;
   height: 72px;
   flex: 0 0 72px;
-  padding: 0 28px;
+  padding: 0 var(--shell-padding);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1269,45 +2367,19 @@ function getStatusClass(status: string) {
   border: 1px solid #e5e7eb;
 }
 
-.user-area {
-  min-width: 0;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  font-weight: 600;
-}
-
-.icon-button {
-  width: 36px;
-  height: 36px;
-  border: none;
-  background: transparent;
-  font-size: 20px;
-}
-
-.avatar {
-  width: 44px;
-  height: 44px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: #e8f0ff;
-}
-
 .layout {
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 208px 1fr;
   overflow: hidden;
   transition: grid-template-columns 180ms ease;
 }
 
 .sidebar {
   position: relative;
-  padding: 28px;
+  padding: 20px 14px;
   background: white;
   border-right: 1px solid #e5eaf3;
   overflow: hidden;
@@ -1330,8 +2402,8 @@ function getStatusClass(status: string) {
 }
 
 .sidebar-collapsed .content {
-  padding-left: 56px;
-  padding-right: 56px;
+  padding-left: 20px;
+  padding-right: 20px;
 }
 
 .sidebar-collapsed .brand > span {
@@ -1345,12 +2417,12 @@ function getStatusClass(status: string) {
 .menu {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .menu-item {
-  height: 64px;
-  padding: 0 20px;
+  height: 58px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1373,35 +2445,10 @@ function getStatusClass(status: string) {
   font-size: 24px;
 }
 
-.tip-card {
-  position: absolute;
-  left: 28px;
-  right: 28px;
-  bottom: 28px;
-  padding: 18px;
-  border: 1px solid #e0e7f0;
-  border-radius: 10px;
-  background: white;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
-}
-
-.tip-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #64748b;
-  font-weight: 600;
-}
-
-.tip-card p {
-  margin: 14px 0 0;
-  color: #64748b;
-}
-
 .content {
   min-width: 0;
   min-height: 0;
-  padding: 34px 48px;
+  padding: var(--shell-padding);
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -1412,7 +2459,7 @@ function getStatusClass(status: string) {
   width: min(820px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .settings-header {
@@ -1454,8 +2501,8 @@ function getStatusClass(status: string) {
 }
 
 .shortcut-setting-row {
-  min-height: 92px;
-  padding: 18px;
+  min-height: 84px;
+  padding: 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1514,7 +2561,7 @@ function getStatusClass(status: string) {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .page-header h1 {
@@ -1545,7 +2592,7 @@ function getStatusClass(status: string) {
 .course-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  gap: 14px;
   min-width: 0;
 }
 
@@ -1555,7 +2602,7 @@ function getStatusClass(status: string) {
   min-height: 154px;
   padding: 14px;
   display: flex;
-  gap: 18px;
+  gap: 14px;
   min-width: 0;
   overflow: hidden;
   background: white;
@@ -1572,6 +2619,14 @@ function getStatusClass(status: string) {
   place-items: center;
   border-radius: 8px;
   font-size: 42px;
+  overflow: hidden;
+}
+
+.course-cover img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .course-cover.blue {
@@ -1608,6 +2663,167 @@ function getStatusClass(status: string) {
 
 .course-cover.orange {
   background: linear-gradient(135deg, #fed7aa, #fff7ed);
+}
+
+.course-cover.image {
+  background: #e2e8f0;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(6px);
+}
+
+.add-course-dialog {
+  width: min(440px, 100%);
+  padding: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.dialog-header p {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.dialog-close-button {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.field-group {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.field-group input {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  outline: none;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 15px;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.field-group input:focus {
+  background: white;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.cover-preview {
+  height: 116px;
+  margin: 4px 0 16px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #dc2626;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.cover-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.dialog-error {
+  min-height: 20px;
+  margin: 0 0 14px;
+  color: #dc2626;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.manage-danger-zone {
+  padding: 14px 0 4px;
+  margin-top: 2px;
+  border-top: 1px solid #eef2f7;
+}
+
+.dialog-danger-button {
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff7f7;
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.dialog-secondary-button,
+.dialog-primary-button {
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.dialog-secondary-button {
+  border: 1px solid #dbe3ee;
+  background: white;
+  color: #334155;
+}
+
+.dialog-primary-button {
+  border: none;
+  background: #2563eb;
+  color: white;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24);
 }
 
 .course-info {
@@ -1687,6 +2903,266 @@ function getStatusClass(status: string) {
   letter-spacing: 2px;
 }
 
+.notes-workspace {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: var(--panel-gap);
+}
+
+.notes-folder-panel,
+.notes-editor-panel,
+.notes-empty-state {
+  min-height: 0;
+  background: white;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+}
+
+.notes-folder-panel {
+  padding: var(--panel-padding);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-folder-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #e5eaf3;
+}
+
+.notes-folder-toolbar h1 {
+  margin: 0;
+  color: #111827;
+  font-size: 24px;
+}
+
+.notes-folder-toolbar span,
+.notes-folder-button small,
+.notes-lesson-button small,
+.notes-editor-topbar p {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.notes-tree-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0 2px;
+}
+
+.notes-tree-action-button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  transition:
+    color 150ms ease,
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.notes-tree-action-button:hover,
+.notes-tree-action-button:focus-visible {
+  border-color: #dbe3ee;
+  background: #f8fafc;
+  color: #334155;
+  outline: none;
+}
+
+.notes-tree-action-button.active {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.notes-tree-action-button svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.notes-folder-list {
+  min-height: 0;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.notes-folder {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.notes-folder-button,
+.notes-lesson-button {
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #334155;
+  text-align: left;
+}
+
+.notes-folder-button {
+  min-height: 48px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e5eaf3;
+}
+
+.notes-folder-button.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.notes-lesson-list-shell {
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+}
+
+.notes-lesson-expand-enter-active,
+.notes-lesson-expand-leave-active {
+  transition:
+    grid-template-rows 180ms ease,
+    opacity 160ms ease,
+    transform 180ms ease;
+}
+
+.notes-lesson-expand-enter-from,
+.notes-lesson-expand-leave-to {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.notes-lesson-expand-enter-to,
+.notes-lesson-expand-leave-from {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.notes-lesson-list {
+  min-height: 0;
+  display: grid;
+  gap: 6px;
+  padding-left: 20px;
+}
+
+.notes-lesson-button {
+  min-height: 40px;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.notes-lesson-button span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-lesson-button.active {
+  background: #f8fafc;
+  color: #111827;
+  font-weight: 700;
+}
+
+.notes-empty-folder {
+  margin: 8px 0;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.notes-editor-panel {
+  padding: var(--panel-padding);
+  overflow: hidden;
+}
+
+.notes-editor-shell {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-editor-topbar {
+  min-height: 60px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 10px;
+}
+
+.notes-editor-topbar h1 {
+  margin: 6px 0 0;
+  color: #111827;
+  font-size: 28px;
+}
+
+.notes-editor-topbar p {
+  margin: 0;
+}
+
+.notes-manager-editor {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+.notes-manager-editor :deep(.tiptap) {
+  min-height: 0;
+  overflow: auto;
+}
+
+.notes-empty-state {
+  padding: 20px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+}
+
+.notes-empty-state.inline {
+  height: 100%;
+  box-shadow: none;
+}
+
+.notes-empty-state h1 {
+  margin: 0;
+  color: #111827;
+  font-size: 30px;
+}
+
+.notes-empty-state p {
+  margin: 10px 0 22px;
+  color: #64748b;
+}
+
 @media (max-width: 1100px) {
   .search-box {
     width: 340px;
@@ -1708,10 +3184,6 @@ function getStatusClass(status: string) {
     font-size: 20px;
   }
 
-  .user-area {
-    gap: 10px;
-  }
-
   .search-box {
     display: none;
   }
@@ -1731,12 +3203,21 @@ function getStatusClass(status: string) {
   }
 
   .content {
-    padding: 24px;
+    padding: 18px;
     justify-content: flex-start;
   }
 
   .course-grid {
     grid-template-columns: 1fr;
+  }
+
+  .notes-workspace {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .notes-folder-panel {
+    max-height: 340px;
   }
 }
 
@@ -1747,12 +3228,6 @@ function getStatusClass(status: string) {
 
   .brand {
     font-size: 18px;
-  }
-
-  .username,
-  .arrow,
-  .user-area .icon-button {
-    display: none;
   }
 
   .page-header {
@@ -1795,106 +3270,60 @@ function getStatusClass(status: string) {
 @media (max-height: 800px) {
   .content {
     justify-content: flex-start;
-    padding-top: 24px;
-    padding-bottom: 24px;
+    padding-top: 18px;
+    padding-bottom: 18px;
   }
 }
+
+.course-study-active .content {
+  padding: 12px;
+}
+
 .course-detail-page {
   height: 100%;
   min-width: 0;
-  overflow: auto;
-  padding-right: 4px;
+  min-height: 0;
+  display: block;
+  overflow: hidden;
 }
 
 .course-detail-page ~ .course-grid {
   display: none;
 }
 
-.breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 18px;
-  color: #64748b;
-  font-size: 15px;
-}
-
-.back-button {
-  border: none;
-  background: transparent;
-  color: #64748b;
-  font-size: 15px;
-  cursor: pointer;
-}
-
-.back-button:hover {
-  color: #2563eb;
-}
-
-.detail-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 24px;
-}
-
-.title-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 22px;
-}
-
-.title-row h1 {
-  margin: 0;
-  font-size: 32px;
-}
-
-.detail-progress-row {
+.course-study-workspace {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 18px;
-  color: #475569;
-}
-
-.detail-progress-bar {
-  width: min(640px, 100%);
-  height: 7px;
-  border-radius: 99px;
-  background: #e5eaf3;
+  grid-template-columns: minmax(220px, 240px) minmax(0, 1fr);
+  column-gap: var(--panel-gap);
   overflow: hidden;
 }
 
-.detail-progress-inner {
-  height: 100%;
-  border-radius: 99px;
-  background: #2563eb;
+.course-study-workspace.lesson-panel-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
 }
 
-.detail-button {
-  height: 46px;
-  padding: 0 22px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: white;
-  color: #334155;
-  font-weight: 600;
+.course-study-workspace.note-position-right {
+  grid-template-columns: minmax(220px, 240px) minmax(0, 1fr) minmax(320px, 380px);
+  column-gap: var(--panel-gap);
 }
 
-.study-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
-  gap: 18px;
-  min-width: 0;
-  overflow: visible;
+.course-study-workspace.note-position-right.lesson-panel-collapsed {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+}
+
+.course-study-workspace.resizing {
+  user-select: none;
+  cursor: row-resize;
 }
 
 .lesson-panel,
-.study-main-panel,
 .video-study-card,
-.note-card,
-.ai-card {
+.note-card {
   background: white;
   border: 1px solid #e1e7ef;
   border-radius: 10px;
@@ -1902,73 +3331,70 @@ function getStatusClass(status: string) {
 }
 
 .lesson-panel {
-  padding: 18px;
-}
-
-.study-main-panel {
-  min-width: 0;
   min-height: 0;
-  padding: 18px;
-}
-
-.study-tabs {
-  height: 44px;
-  padding: 4px;
-  margin-bottom: 18px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.study-tabs button {
-  height: 34px;
-  padding: 0 18px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #475569;
-  font-weight: 700;
-}
-
-.study-tabs button.active {
-  background: #2563eb;
-  color: white;
-  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.18);
+  grid-column: 1;
+  grid-row: 1;
+  padding: var(--panel-padding);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .lesson-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding-bottom: 14px;
   border-bottom: 1px solid #e5eaf3;
 }
 
 .lesson-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
+}
+
+.lesson-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .lesson-header button {
   border: none;
   background: transparent;
   color: #64748b;
+  font-size: 14px;
+}
+
+.lesson-expand-button {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 2;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #475569;
+  font-weight: 700;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px);
 }
 
 .lesson-list {
-  margin-top: 14px;
+  min-height: 0;
+  margin-top: 10px;
+  overflow: auto;
 }
 
 .lesson-item {
   width: 100%;
   min-height: 76px;
-  padding: 14px;
+  padding: 14px 12px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   border: none;
   border-bottom: 1px solid #e5eaf3;
   background: white;
@@ -1993,47 +3419,33 @@ function getStatusClass(status: string) {
   background: #eff6ff;
 }
 
-.lesson-done {
-  color: #22c55e;
-  font-size: 14px;
-}
-
-.lesson-playing {
-  color: #2563eb;
-}
-
-.lesson-pending {
-  color: #94a3b8;
-  font-size: 14px;
-}
-
 .video-study-card {
-  padding: 0;
-  border: none;
-  box-shadow: none;
-}
-
-.study-card-header {
+  min-width: 0;
+  min-height: 0;
+  grid-column: 2;
+  grid-row: 1;
+  padding: var(--panel-padding);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 18px;
+  flex-direction: column;
 }
 
-.study-card-header h2 {
-  margin: 0;
-  font-size: 22px;
+.course-study-workspace.lesson-panel-collapsed .video-study-card {
+  grid-column: 1;
 }
 
-.fullscreen-button {
-  flex-shrink: 0;
+.course-study-workspace.note-position-right .video-study-card {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.course-study-workspace.note-position-right.lesson-panel-collapsed .video-study-card {
+  grid-column: 1;
 }
 
 .fake-video {
   position: relative;
-  height: min(56vh, 520px);
-  min-height: 360px;
+  flex: 1;
+  min-height: 280px;
   overflow: hidden;
   border-radius: 10px;
   background: linear-gradient(135deg, #0f172a, #1d4ed8);
@@ -2045,24 +3457,28 @@ function getStatusClass(status: string) {
 }
 
 .video-player-card {
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid #dbe3ee;
   border-radius: 10px;
   background: #0f172a;
+  display: flex;
+  flex-direction: column;
 }
 
 .video-iframe {
   display: block;
   width: 100%;
-  height: min(56vh, 520px);
-  min-height: 360px;
+  flex: 1;
+  min-height: 0;
   border: none;
   background: #0f172a;
 }
 
 .video-link-fallback {
-  height: min(56vh, 520px);
-  min-height: 360px;
+  flex: 1;
+  min-height: 280px;
   padding: 28px;
   display: flex;
   flex-direction: column;
@@ -2085,42 +3501,19 @@ function getStatusClass(status: string) {
   line-height: 1.7;
 }
 
-.video-source-bar {
-  min-height: 46px;
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: white;
-  border-top: 1px solid #dbe3ee;
-}
-
-.video-source-bar span {
-  flex: 1;
-  min-width: 0;
-  color: #475569;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.video-source-bar button {
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid #dbe3ee;
-  border-radius: 6px;
-  background: white;
-  color: #334155;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.video-source-bar button.danger {
-  color: #dc2626;
-}
-
 .video-cover-icon {
   font-size: 88px;
   margin-bottom: 12px;
+}
+
+.video-cover-image {
+  width: 132px;
+  height: 88px;
+  margin-bottom: 16px;
+  display: block;
+  border-radius: 10px;
+  object-fit: cover;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.26);
 }
 
 .fake-video h3 {
@@ -2146,105 +3539,56 @@ function getStatusClass(status: string) {
   background: rgba(15, 23, 42, 0.7);
 }
 
-.lesson-desc {
-  margin: 18px 0 42px;
-  color: #475569;
-  line-height: 1.8;
-}
-
-.lesson-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.prev-button,
-.next-button {
-  height: 42px;
-  padding: 0 22px;
-  border-radius: 8px;
-  font-weight: 600;
-}
-
-.prev-button {
-  border: 1px solid #dbe3ee;
-  background: white;
-  color: #334155;
-}
-
-.next-button {
-  border: none;
-  background: #2563eb;
-  color: white;
-}
-
-.mini-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: #475569;
-  font-size: 14px;
-}
-
-.mini-progress-bar {
-  width: 190px;
-  height: 7px;
-  border-radius: 99px;
-  background: #e5eaf3;
-  overflow: hidden;
-}
-
-.mini-progress-inner {
-  width: 60%;
-  height: 100%;
-  background: #2563eb;
-}
-
-.right-panel {
+.note-card {
+  min-height: 0;
+  grid-column: 1 / -1;
+  grid-row: 3;
+  padding: var(--panel-padding);
   display: flex;
   flex-direction: column;
-  gap: 18px;
 }
 
-.note-card {
-  padding: 0;
-  min-height: 620px;
-  border: none;
-  box-shadow: none;
+.course-study-workspace.note-position-right .note-card {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.course-study-workspace.note-position-right.lesson-panel-collapsed .note-card {
+  grid-column: 2;
 }
 
 .note-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: 10px;
 }
 
-.note-header h2 {
-  flex: 1;
-  margin: 0;
-  font-size: 20px;
-}
-
-.note-header span {
+.note-save-status {
   color: #64748b;
-  font-size: 14px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .note-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .note-actions button {
-  height: 32px;
-  padding: 0 12px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: #2563eb;
   color: white;
-  font-weight: 600;
 }
 
 .note-actions button.secondary {
@@ -2253,20 +3597,53 @@ function getStatusClass(status: string) {
   color: #334155;
 }
 
+.note-actions button:hover,
+.note-actions button:focus-visible {
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.note-actions button.secondary:hover,
+.note-actions button.secondary:focus-visible {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+  color: #2563eb;
+}
+
+.note-actions button.save-action:hover,
+.note-actions button.save-action:focus-visible {
+  background: #1d4ed8;
+}
+
+.note-actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .wysiwyg-note-editor {
-  height: min(64vh, 620px);
-  min-height: 460px;
+  flex: 1;
+  min-height: 0;
   border: 1px solid #e1e7ef;
   border-radius: 8px;
   overflow: hidden;
   background: white;
 }
 
+.note-editor-content {
+  height: 100%;
+  min-height: 0;
+}
+
 .wysiwyg-note-editor :deep(.tiptap) {
   height: 100%;
-  min-height: 458px;
+  min-height: 0;
   padding: 20px;
-  overflow: hidden;
+  overflow: auto;
   outline: none;
   color: #111827;
   font-size: 15px;
@@ -2325,89 +3702,45 @@ function getStatusClass(status: string) {
   color: #475569;
 }
 
-.note-toolbar {
-  height: 38px;
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  border: 1px solid #e1e7ef;
-  border-radius: 8px 8px 0 0;
-  color: #475569;
-}
-
-.detail-note-input {
+.study-resize-handle {
+  grid-column: 1 / -1;
+  grid-row: 2;
   width: 100%;
-  height: 340px;
-  padding: 16px;
-  border: 1px solid #e1e7ef;
-  border-top: none;
-  border-radius: 0 0 8px 8px;
-  resize: none;
-  outline: none;
-  font-size: 15px;
-  line-height: 1.8;
-}
-
-.ai-card {
-  padding: 22px;
-  min-height: 420px;
+  height: 8px;
   border: none;
-  box-shadow: none;
-}
-
-.ai-title {
-  display: flex;
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.ai-icon {
-  width: 42px;
-  height: 42px;
+  background: transparent;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: #eaf1ff;
-  color: #2563eb;
-  font-size: 22px;
+  cursor: row-resize;
 }
 
-.ai-title h2 {
-  margin: 0 0 6px;
-  font-size: 18px;
+.study-resize-handle span {
+  width: 72px;
+  height: 4px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition:
+    width 150ms ease,
+    background 150ms ease;
 }
 
-.ai-title p {
-  margin: 0;
-  color: #64748b;
-  font-size: 14px;
+.study-resize-handle:hover span,
+.study-resize-handle:focus-visible span,
+.course-study-workspace.resizing .study-resize-handle span {
+  width: 96px;
+  background: #2563eb;
 }
 
-.ai-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.ai-actions button {
-  height: 46px;
-  border: 1px solid #2563eb;
-  border-radius: 8px;
-  background: white;
-  color: #2563eb;
-  font-weight: 700;
+.course-study-workspace.note-position-right .study-resize-handle {
+  display: none;
 }
 
 .fullscreen-active .top-bar,
 .fullscreen-active .sidebar,
 .fullscreen-active .collapsed-dock,
-.fullscreen-active .breadcrumb,
-.fullscreen-active .detail-header,
 .fullscreen-active .lesson-panel,
-.fullscreen-active .study-tabs,
-.fullscreen-active .lesson-desc,
-.fullscreen-active .lesson-actions {
+.fullscreen-active .lesson-expand-button,
+.fullscreen-active .study-resize-handle {
   display: none;
 }
 
@@ -2420,22 +3753,18 @@ function getStatusClass(status: string) {
 }
 
 .fullscreen-active .course-detail-page,
-.fullscreen-active .study-layout,
-.fullscreen-active .study-main-panel {
+.fullscreen-active .course-study-workspace {
   width: 100%;
   height: 100vh;
   min-height: 0;
 }
 
-.fullscreen-active .study-layout {
+.fullscreen-active .course-detail-page {
   display: block;
 }
 
-.fullscreen-active .study-main-panel {
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
+.fullscreen-active .course-study-workspace {
+  display: block;
 }
 
 .fullscreen-active .video-study-card,
@@ -2447,7 +3776,6 @@ function getStatusClass(status: string) {
   box-shadow: none;
 }
 
-.fullscreen-active .study-card-header,
 .fullscreen-active .note-header {
   height: 44px;
   margin-bottom: 12px;
@@ -2455,12 +3783,13 @@ function getStatusClass(status: string) {
 
 .fullscreen-active .video-player-card,
 .fullscreen-active .fake-video {
-  height: calc(100vh - 74px);
+  height: 100%;
   min-height: 0;
 }
 
-.fullscreen-active .video-iframe {
-  height: calc(100vh - 124px);
+.fullscreen-video .note-card,
+.fullscreen-notes .video-study-card {
+  display: none;
 }
 
 .fullscreen-notes .wysiwyg-note-editor {
@@ -2471,5 +3800,51 @@ function getStatusClass(status: string) {
 .fullscreen-notes .wysiwyg-note-editor :deep(.tiptap) {
   min-height: 0;
   overflow: auto;
+}
+
+@media (max-width: 820px) {
+  .course-study-active .content,
+  .course-study-active.sidebar-collapsed .content {
+    padding: 18px;
+  }
+
+  .course-detail-page {
+    display: block;
+    overflow: auto;
+  }
+
+  .course-study-workspace {
+    height: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow: visible;
+  }
+
+  .lesson-panel {
+    max-height: 320px;
+  }
+
+  .video-study-card {
+    min-height: 360px;
+  }
+
+  .note-card {
+    min-height: 420px;
+  }
+
+  .study-resize-handle {
+    display: none;
+  }
+
+  .lesson-expand-button {
+    position: static;
+    align-self: flex-start;
+  }
+
+  .fake-video,
+  .video-link-fallback {
+    min-height: 280px;
+  }
 }
 </style>

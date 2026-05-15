@@ -2,13 +2,17 @@
 
 ## Project Overview
 
-This project is a Vue 3 + TypeScript + Vite single-page app for a personal learning workspace. The current UI is a course-management dashboard with:
+This project is a Vue 3 + TypeScript + Vite single-page app for a personal learning workspace. The current UI is a quiet course-management and study dashboard with:
 
 - a top navigation bar, search box, and user area
-- a left sidebar menu for course management, notes, AI summary, and settings
-- a course list with progress cards
-- a course-detail view with lessons, a mock video area, notes, and AI assistant actions
-- note persistence through `localStorage`
+- a collapsible left sidebar for course management, notes, AI summary, and settings
+- a course list with progress cards and course management actions
+- add/edit/delete course dialogs with persisted course data
+- a course-detail study view with lessons, video, notes, and AI assistant panels
+- imported Bilibili/YouTube video links embedded per course and lesson when possible
+- rich-text note editing through Tiptap, with Markdown import/export conversion
+- per-course and per-lesson note/video persistence through `localStorage`
+- configurable keyboard shortcuts for video/notes fullscreen study modes
 
 Most application logic and UI currently live in one large Vue single-file component:
 
@@ -33,6 +37,9 @@ Static assets are in:
 - TypeScript
 - Vite
 - `vue-tsc` for type checking
+- Tiptap (`@tiptap/vue-3`, `@tiptap/starter-kit`) for the note editor
+- `marked` for Markdown-to-HTML conversion
+- `turndown` for HTML-to-Markdown conversion
 - No router, store, backend API, or test framework is configured yet
 
 Package scripts:
@@ -71,54 +78,61 @@ npm run preview
 
 `src/components/HelloWorld.vue` and several default Vite assets appear to be template leftovers unless they are reintroduced later.
 
-## Development Notes
+## Application State And Persistence
 
-- Treat `src/App.vue` as the current source of truth for product behavior.
-- The project currently uses hard-coded course and lesson data inside `App.vue`.
+- Courses are stored under `learnflow_courses`.
 - Notes are saved per course and lesson using keys like:
 
 ```ts
 learnflow_note_course_${courseId}_lesson_${lessonId}
 ```
 
-- The app uses scoped CSS inside `App.vue` for most dashboard styling.
-- `src/style.css` still contains a lot of Vite starter-page styling. Some of it affects the app globally, especially `#app`, `body`, heading styles, and CSS variables.
-- Avoid editing `node_modules/`.
-- Keep changes focused. There is not yet an established component architecture, so introduce new components only when they clearly reduce complexity.
+- Video links are saved per course and lesson using keys like:
 
-## Known Current Issues
-
-`npm run build` currently fails. Verified on 2026-05-12 with these TypeScript errors:
-
-```text
-src/App.vue(182,10): error TS6133: 'selectLesson' is declared but its value is never read.
-src/App.vue(191,27): error TS2502: 'course' is referenced directly or indirectly in its own type annotation.
-src/App.vue(310,19): error TS2349: This expression is not callable.
-  Type '{ id: number; title: string; status: string; time: string; }' has no call signatures.
+```ts
+learnflow_video_course_${courseId}_lesson_${lessonId}
 ```
 
-Likely fixes:
+- Keyboard shortcuts are stored under `learnflow_shortcuts`.
+- The app currently uses a fixed lesson list in `src/App.vue`; courses are user-created and persisted locally.
+- Default note content exists for the first few lessons when there is no saved local note.
 
-- Use `@click="selectLesson(lesson)"` instead of calling `selectedLesson(lesson)` in the template.
-- Type `openCourseDetail` from the course array, for example `typeof courses[number]`, not `typeof course[number]`.
-- After the template calls `selectLesson`, the unused-local error should go away.
+## Development Notes
 
-The source text displayed in the terminal appears mojibake/garbled for Chinese and emoji strings. Before making large text edits, inspect the file carefully in an editor that preserves the intended encoding and avoid broad search-and-replace over user-facing copy.
+- Treat `src/App.vue` as the current source of truth for product behavior.
+- The app uses scoped CSS inside `App.vue` for most dashboard styling.
+- `src/style.css` now contains the lean global reset and shared CSS variables for the full-screen app shell.
+- Avoid editing `node_modules/`.
+- Keep changes focused. There is not yet an established component architecture, so introduce new components only when they clearly reduce complexity.
+- Preserve Chinese user-facing copy and emoji carefully. The app intentionally uses Chinese labels throughout the UI.
+- For large text edits, inspect files with UTF-8 handling and avoid broad search-and-replace over user-facing copy.
+- Course/video/note data is browser-local only; there is no backend synchronization.
+
+## Current Verification
+
+`npm run build` passes as of 2026-05-14:
+
+```text
+vue-tsc -b && vite build
+```
+
+The build produces assets in `dist/`. Treat `dist/` as generated output unless the project later documents a deployment workflow that requires committing it.
 
 ## Suggested Workflow For Future Agents
 
 1. Start by reading `package.json`, `src/App.vue`, `src/main.ts`, and `src/style.css`.
 2. Run `npm run build` before and after code changes when possible.
 3. If working on UI, run `npm run dev` and inspect the app in a browser.
-4. Prefer extracting stable pieces from `App.vue` only when the feature work benefits from it.
+4. Prefer extracting stable pieces from `App.vue` only when feature work benefits from it.
 5. Preserve the current product direction: a quiet, productivity-focused personal learning dashboard rather than a marketing page.
+6. Be careful with `localStorage` key changes because they affect existing user data.
 
 ## Git State
 
-This directory is currently not a git repository. `git status` reports:
+This directory is now a git repository. Check the working tree before editing:
 
-```text
-fatal: not a git repository (or any of the parent directories): .git
+```bash
+git status --short
 ```
 
-Do not assume branch, commit, or diff tooling is available unless git is initialized later.
+At the time this document was updated, `src/App.vue` already had uncommitted changes. Do not revert or overwrite unrelated user changes.
