@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "start": "bash ./scripts/start.sh",
+    "setup:backend": "bash ./scripts/setup-backend.sh",
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview"

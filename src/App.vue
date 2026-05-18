@@ -4,6 +4,12 @@ import { EditorContent, useEditor } from '@tiptap/vue-3';
 import StarterKit from '@tiptap/starter-kit';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
+import kebanLogo from './assets/keban-logo.png'
+import AiConfigSettings from './components/AiConfigSettings.vue'
+import AiNoteGenerator from './components/AiNoteGenerator.vue'
+import DownloaderConfigSettings from './components/DownloaderConfigSettings.vue'
+import TranscriptionConfigSettings from './components/TranscriptionConfigSettings.vue'
+import type { VideoNotePlatform } from './services/videoNotes'
 
 type YoutubePlayer = {
   getCurrentTime: () => number
@@ -26,12 +32,66 @@ const isSidebarCollapsed = ref(false)
 const menuItems = [
   { name: '课程管理', icon: '📘'},
   { name: '笔记管理', icon: '📄'},
-  { name: 'AI总结', icon: '✨'},
   { name: '设置', icon: '⚙️',}
 ]
 const courseMenuName = menuItems[0].name
 const noteMenuName = menuItems[1].name
-const settingsMenuName = menuItems[3].name
+const settingsMenuName = menuItems[2].name
+type SettingsSectionId = 'shortcuts' | 'ai' | 'download' | 'transcription'
+
+const settingsGroups: {
+  title: string
+  items: {
+    id: SettingsSectionId
+    label: string
+    icon: string
+    description: string
+  }[]
+}[] = [
+  {
+    title: '学习体验',
+    items: [
+      {
+        id: 'shortcuts',
+        label: '快捷键',
+        icon: '⌘',
+        description: '配置学习时最常用的区域全屏操作。'
+      }
+    ]
+  },
+  {
+    title: 'AI 服务',
+    items: [
+      {
+        id: 'ai',
+        label: 'AI 生成',
+        icon: '✦',
+        description: '管理摘要生成所使用的模型服务。'
+      },
+      {
+        id: 'transcription',
+        label: '转写配置',
+        icon: '◌',
+        description: '设置无字幕视频时使用的音频转写服务。'
+      }
+    ]
+  },
+  {
+    title: '视频处理',
+    items: [
+      {
+        id: 'download',
+        label: '下载配置',
+        icon: '↓',
+        description: '配置字幕读取、音频下载与网络代理。'
+      }
+    ]
+  }
+]
+const activeSettingsSection = ref<SettingsSectionId>('shortcuts')
+const currentSettingsSection = computed(
+  () => settingsGroups.flatMap((group) => group.items).find((item) => item.id === activeSettingsSection.value)!
+)
 
 function changeMenu(menuName: string) {
   saveCurrentNote()
@@ -226,19 +286,27 @@ type ShortcutBinding = {
 
 const SHORTCUT_STORAGE_KEY = 'learnflow_shortcuts'
 const STUDY_SPLIT_STORAGE_KEY = 'learnflow_study_split_ratio'
+const STUDY_SIDE_NOTES_WIDTH_STORAGE_KEY = 'learnflow_study_side_notes_width'
 const STUDY_NOTE_POSITION_STORAGE_KEY = 'learnflow_study_note_position'
 const DEFAULT_STUDY_SPLIT_RATIO = 0.6
+const DEFAULT_STUDY_SIDE_NOTES_WIDTH = 460
 const DEFAULT_STUDY_NOTE_POSITION: StudyNotePosition = 'bottom'
 const STUDY_VIDEO_MIN_HEIGHT = 280
 const STUDY_NOTES_MIN_HEIGHT = 220
 const STUDY_SPLIT_HANDLE_HEIGHT = 8
+const STUDY_VIDEO_MIN_WIDTH = 320
+const STUDY_NOTES_MIN_WIDTH = 280
+const STUDY_SIDE_SPLIT_HANDLE_WIDTH = 8
 const fullscreenMode = ref<FullscreenMode>(null)
 const videoIframeRef = ref<HTMLIFrameElement | null>(null)
 const studyWorkspaceRef = ref<HTMLElement | null>(null)
 const studySplitRatio = ref(loadSavedStudySplitRatio())
+const studySideNotesWidth = ref(loadSavedStudySideNotesWidth())
 const studyNotePosition = ref<StudyNotePosition>(loadSavedStudyNotePosition())
 const isResizingStudySplit = ref(false)
 const activeStudySplitPointerId = ref<number | null>(null)
+const isResizingStudySideSplit = ref(false)
+const activeStudySideSplitPointerId = ref<number | null>(null)
 const isLessonPanelCollapsed = ref(false)
 const savedPlaybackSeconds = ref<Record<string, number>>({})
 const recordingShortcutAction = ref<ShortcutAction | null>(null)
@@ -332,6 +400,17 @@ function saveStudySplitRatio() {
   localStorage.setItem(STUDY_SPLIT_STORAGE_KEY, String(studySplitRatio.value))
 }
 
+function loadSavedStudySideNotesWidth() {
+  const savedWidth = Number.parseFloat(localStorage.getItem(STUDY_SIDE_NOTES_WIDTH_STORAGE_KEY) ?? '')
+  return Number.isFinite(savedWidth) && savedWidth >= STUDY_NOTES_MIN_WIDTH
+    ? savedWidth
+    : DEFAULT_STUDY_SIDE_NOTES_WIDTH
+}
+
+function saveStudySideNotesWidth() {
+  localStorage.setItem(STUDY_SIDE_NOTES_WIDTH_STORAGE_KEY, String(studySideNotesWidth.value))
+}
+
 function isStudyNotePosition(value: string | null): value is StudyNotePosition {
   return value === 'bottom' || value === 'right'
 }
@@ -346,9 +425,8 @@ function saveStudyNotePosition() {
 }
 
 function toggleStudyNotePosition() {
-  if (studyNotePosition.value === 'bottom') {
-    stopStudySplitResize()
-  }
+  stopStudySplitResize()
+  stopStudySideSplitResize()
 
   studyNotePosition.value = studyNotePosition.value === 'bottom' ? 'right' : 'bottom'
   saveStudyNotePosition()
@@ -360,7 +438,10 @@ const studyWorkspaceStyle = computed(() => (
         gridTemplateRows: `${studySplitRatio.value * 100}% ${STUDY_SPLIT_HANDLE_HEIGHT}px minmax(${STUDY_NOTES_MIN_HEIGHT}px, 1fr)`
       }
     : {
-        gridTemplateRows: 'minmax(0, 1fr)'
+        gridTemplateRows: 'minmax(0, 1fr)',
+        gridTemplateColumns: isLessonPanelCollapsed.value
+          ? `minmax(${STUDY_VIDEO_MIN_WIDTH}px, 1fr) ${STUDY_SIDE_SPLIT_HANDLE_WIDTH}px clamp(${STUDY_NOTES_MIN_WIDTH}px, ${studySideNotesWidth.value}px, calc(100% - ${STUDY_VIDEO_MIN_WIDTH}px - ${STUDY_SIDE_SPLIT_HANDLE_WIDTH}px))`
+          : `minmax(220px, 240px) minmax(${STUDY_VIDEO_MIN_WIDTH}px, 1fr) ${STUDY_SIDE_SPLIT_HANDLE_WIDTH}px clamp(${STUDY_NOTES_MIN_WIDTH}px, ${studySideNotesWidth.value}px, calc(100% - 240px - var(--panel-gap) - ${STUDY_VIDEO_MIN_WIDTH}px - ${STUDY_SIDE_SPLIT_HANDLE_WIDTH}px))`
       }
 ))
 
@@ -555,6 +636,20 @@ const areAllNoteCoursesExpanded = computed(() => (
 const currentVideoEmbedUrl = computed(() => getVideoEmbedUrl(currentVideoUrl.value))
 const currentVideoPlatform = computed(() => getVideoPlatform(currentVideoUrl.value))
 const currentYoutubeVideoId = computed(() => getYoutubeVideoId(currentVideoUrl.value) ?? '')
+const currentVideoGenerationPlatform = computed<VideoNotePlatform | ''>(() => {
+  const normalizedUrl = normalizeVideoUrl(currentVideoUrl.value)
+
+  if (
+    getBilibiliBvid(normalizedUrl) ||
+    normalizedUrl.includes('bilibili.com') ||
+    normalizedUrl.includes('b23.tv')
+  ) {
+    return 'bilibili'
+  }
+
+  if (getYoutubeVideoId(currentVideoUrl.value)) return 'youtube'
+  return ''
+})
 
 function getPlaybackKey() {
   if (!selectedCourse.value) return ''
@@ -1099,6 +1194,19 @@ function initializeNoteWorkspace() {
   ensureNoteCourseExpanded(preferredCourse.id)
 }
 
+function appendGeneratedSummary(markdown: string) {
+  syncCurrentNoteFromEditor()
+
+  const trimmedCurrentNote = currentNote.value.trimEnd()
+  const trimmedMarkdown = markdown.trim()
+  const summaryBlock = `---\n\n## AI 生成摘要\n\n${trimmedMarkdown}`
+  const nextNote = trimmedCurrentNote ? `${trimmedCurrentNote}\n\n${summaryBlock}` : summaryBlock
+
+  currentNote.value = nextNote
+  applyNoteToEditor(nextNote)
+  saveCurrentNote()
+}
+
 function selectNoteWorkspaceCourse(course: Course) {
   toggleNoteCourseExpansion(course.id)
 
@@ -1327,6 +1435,9 @@ function startStudySplitResize(event: PointerEvent) {
   if (event.pointerType === 'mouse' && event.button !== 0) return
 
   event.preventDefault()
+  if (event.currentTarget instanceof HTMLElement) {
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
   isResizingStudySplit.value = true
   activeStudySplitPointerId.value = event.pointerId
   updateStudySplitFromClientY(event.clientY)
@@ -1352,6 +1463,112 @@ function resizeStudySplitByKeyboard(event: KeyboardEvent) {
   }
 
   saveStudySplitRatio()
+}
+
+function getStudyPanelGap() {
+  const workspace = studyWorkspaceRef.value
+
+  if (!workspace || isLessonPanelCollapsed.value) return 0
+
+  const gap = Number.parseFloat(getComputedStyle(workspace).getPropertyValue('--panel-gap'))
+  return Number.isFinite(gap) ? gap : 0
+}
+
+function getStudySideSplitBounds() {
+  const workspace = studyWorkspaceRef.value
+
+  if (!workspace) {
+    return {
+      minNotesWidth: STUDY_NOTES_MIN_WIDTH,
+      maxNotesWidth: DEFAULT_STUDY_SIDE_NOTES_WIDTH,
+      startX: 0,
+      availableWidth: 1
+    }
+  }
+
+  const lessonPanelWidth = isLessonPanelCollapsed.value
+    ? 0
+    : workspace.querySelector<HTMLElement>('.lesson-panel')?.getBoundingClientRect().width ?? 0
+  const startX = workspace.getBoundingClientRect().left + lessonPanelWidth + getStudyPanelGap()
+  const availableWidth = Math.max(
+    workspace.clientWidth - lessonPanelWidth - getStudyPanelGap() - STUDY_SIDE_SPLIT_HANDLE_WIDTH,
+    1
+  )
+  const maxNotesWidth = Math.max(STUDY_NOTES_MIN_WIDTH, availableWidth - STUDY_VIDEO_MIN_WIDTH)
+
+  return {
+    minNotesWidth: STUDY_NOTES_MIN_WIDTH,
+    maxNotesWidth,
+    startX,
+    availableWidth
+  }
+}
+
+function updateStudySideSplitFromClientX(clientX: number) {
+  const { minNotesWidth, maxNotesWidth, startX, availableWidth } = getStudySideSplitBounds()
+  const rawVideoWidth = clientX - startX
+  const rawNotesWidth = availableWidth - rawVideoWidth
+  studySideNotesWidth.value = Math.min(maxNotesWidth, Math.max(minNotesWidth, rawNotesWidth))
+}
+
+function handleStudySideSplitPointerMove(event: PointerEvent) {
+  if (!isResizingStudySideSplit.value) return
+  if (activeStudySideSplitPointerId.value !== null && event.pointerId !== activeStudySideSplitPointerId.value) return
+
+  if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) {
+    stopStudySideSplitResize()
+    return
+  }
+
+  event.preventDefault()
+  updateStudySideSplitFromClientX(event.clientX)
+}
+
+function stopStudySideSplitResize() {
+  if (!isResizingStudySideSplit.value) return
+
+  isResizingStudySideSplit.value = false
+  activeStudySideSplitPointerId.value = null
+  saveStudySideNotesWidth()
+  window.removeEventListener('pointermove', handleStudySideSplitPointerMove)
+  window.removeEventListener('pointerup', stopStudySideSplitResize)
+  window.removeEventListener('pointercancel', stopStudySideSplitResize)
+  window.removeEventListener('blur', stopStudySideSplitResize)
+}
+
+function startStudySideSplitResize(event: PointerEvent) {
+  if (window.matchMedia('(max-width: 820px)').matches) return
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+
+  event.preventDefault()
+  if (event.currentTarget instanceof HTMLElement) {
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  isResizingStudySideSplit.value = true
+  activeStudySideSplitPointerId.value = event.pointerId
+  updateStudySideSplitFromClientX(event.clientX)
+  window.addEventListener('pointermove', handleStudySideSplitPointerMove)
+  window.addEventListener('pointerup', stopStudySideSplitResize)
+  window.addEventListener('pointercancel', stopStudySideSplitResize)
+  window.addEventListener('blur', stopStudySideSplitResize)
+}
+
+function resizeStudySideSplitByKeyboard(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+
+  event.preventDefault()
+  const { minNotesWidth, maxNotesWidth } = getStudySideSplitBounds()
+
+  if (event.key === 'Home') {
+    studySideNotesWidth.value = maxNotesWidth
+  } else if (event.key === 'End') {
+    studySideNotesWidth.value = minNotesWidth
+  } else {
+    const delta = event.key === 'ArrowLeft' ? 24 : -24
+    studySideNotesWidth.value = Math.min(maxNotesWidth, Math.max(minNotesWidth, studySideNotesWidth.value + delta))
+  }
+
+  saveStudySideNotesWidth()
 }
 
 watch([selectedCourse, selectedLesson], () => {
@@ -1400,6 +1617,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', stopStudySplitResize)
   window.removeEventListener('pointercancel', stopStudySplitResize)
   window.removeEventListener('blur', stopStudySplitResize)
+  window.removeEventListener('pointermove', handleStudySideSplitPointerMove)
+  window.removeEventListener('pointerup', stopStudySideSplitResize)
+  window.removeEventListener('pointercancel', stopStudySideSplitResize)
+  window.removeEventListener('blur', stopStudySideSplitResize)
   clearTimeout(autoSaveTimer)
   destroyYoutubePlayer()
   syncCurrentNoteFromEditor()
@@ -1442,31 +1663,24 @@ function getStatusClass(status: string) {
   >
     <header class="top-bar">
       <div class="brand">
-        <div class="brand-icon">📘</div>
+        <img class="brand-logo" :src="kebanLogo" alt="课伴" />
         <button class="brand-sidebar-toggle" type="button" :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'" @click="toggleSidebar">
           <span class="dock-icon dock-sidebar-icon"></span>
         </button>
-        <span>个人学习工作台</span>
+        <div v-if="isSidebarCollapsed" class="collapsed-dock" aria-label="主导航">
+          <button
+            v-for="item in menuItems"
+            :key="item.name"
+            type="button"
+            :class="{ active: activeMenu === item.name }"
+            :title="item.name"
+            @click="changeMenu(item.name)"
+          >
+            <span class="dock-menu-icon">{{ item.icon }}</span>
+          </button>
+        </div>
       </div>
 
-      <div v-if="isSidebarCollapsed" class="collapsed-dock" aria-label="主导航">
-        <button
-          v-for="item in menuItems"
-          :key="item.name"
-          type="button"
-          :class="{ active: activeMenu === item.name }"
-          :title="item.name"
-          @click="changeMenu(item.name)"
-        >
-          <span class="dock-menu-icon">{{ item.icon }}</span>
-        </button>
-      </div>
-
-      <div class="search-box">
-        <span class="search-icon">🔍</span>
-        <input placeholder="搜索课程、笔记、知识点..." />
-        <span class="shortcut">⌘ K</span>
-      </div>
     </header>
 
     <div class="layout">
@@ -1480,58 +1694,90 @@ function getStatusClass(status: string) {
       @click="changeMenu(item.name)"
   >
     <span class="menu-icon">{{ item.icon }}</span>
-    <span>{{ item.name }}</span>
+    <span class="menu-label">{{ item.name }}</span>
   </button>
         </nav>
 
       </aside>
 
       <main class="content">
-        <section v-if="activeMenu === settingsMenuName" class="settings-panel">
-          <div class="settings-header">
-            <div>
-              <h1>快捷键设置</h1>
-              <p>设置学习时常用的区域全屏快捷键，配置会保存在本机浏览器中。</p>
-            </div>
-            <button class="reset-shortcuts-button" @click="resetShortcuts">恢复默认</button>
-          </div>
-
-          <div class="shortcut-settings-list">
-            <article
-              v-for="item in shortcutActions"
-              :key="item.action"
-              class="shortcut-setting-row"
+        <section v-if="activeMenu === settingsMenuName" class="settings-page">
+          <aside class="settings-navigation">
+            <section
+              v-for="group in settingsGroups"
+              :key="group.title"
+              class="settings-nav-group"
             >
+              <button
+                v-for="item in group.items"
+                :key="item.id"
+                class="settings-nav-item"
+                :class="{ active: activeSettingsSection === item.id }"
+                @click="activeSettingsSection = item.id"
+              >
+                <span>{{ item.icon }}</span>
+                {{ item.label }}
+              </button>
+            </section>
+          </aside>
+
+          <div class="settings-main">
+            <div class="settings-header">
               <div>
-                <h2>{{ item.label }}</h2>
-                <p>{{ item.description }}</p>
+                <h1>{{ currentSettingsSection.label }}</h1>
+              </div>
+              <button
+                v-if="activeSettingsSection === 'shortcuts'"
+                class="reset-shortcuts-button"
+                @click="resetShortcuts"
+              >
+                恢复默认
+              </button>
+            </div>
+
+            <section v-if="activeSettingsSection === 'shortcuts'" class="settings-module shortcut-module">
+              <div class="shortcut-settings-list">
+                <article
+                  v-for="item in shortcutActions"
+                  :key="item.action"
+                  class="shortcut-setting-row"
+                >
+                  <div>
+                    <h2>{{ item.label }}</h2>
+                    <p>{{ item.description }}</p>
+                  </div>
+
+                  <div class="shortcut-setting-actions">
+                    <kbd>{{ formatShortcut(shortcuts[item.action]) }}</kbd>
+                    <button
+                      v-if="recordingShortcutAction !== item.action"
+                      @click="startRecordingShortcut(item.action)"
+                    >
+                      修改
+                    </button>
+                    <button
+                      v-else
+                      class="secondary"
+                      @click="cancelRecordingShortcut"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </article>
               </div>
 
-              <div class="shortcut-setting-actions">
-                <kbd>{{ formatShortcut(shortcuts[item.action]) }}</kbd>
-                <button
-                  v-if="recordingShortcutAction !== item.action"
-                  @click="startRecordingShortcut(item.action)"
-                >
-                  修改
-                </button>
-                <button
-                  v-else
-                  class="secondary"
-                  @click="cancelRecordingShortcut"
-                >
-                  取消
-                </button>
-              </div>
-            </article>
+              <p v-if="shortcutMessage" class="shortcut-message">
+                {{ shortcutMessage }}
+              </p>
+            </section>
+
+            <AiConfigSettings v-else-if="activeSettingsSection === 'ai'" />
+            <DownloaderConfigSettings v-else-if="activeSettingsSection === 'download'" />
+            <TranscriptionConfigSettings v-else-if="activeSettingsSection === 'transcription'" />
           </div>
-
-          <p v-if="shortcutMessage" class="shortcut-message">
-            {{ shortcutMessage }}
-          </p>
         </section>
 
-        <section v-else-if="activeMenu === noteMenuName" class="notes-workspace">
+        <section v-else-if="activeMenu === noteMenuName" class="notes-workspace note-theme">
           <div v-if="courses.length === 0" class="notes-empty-state">
             <h1>笔记管理</h1>
             <p>先添加课程后开始整理每个小节的笔记。</p>
@@ -1654,9 +1900,33 @@ function getStatusClass(status: string) {
                   </div>
 
                   <div class="note-actions">
-                    <span>{{ savedText }}</span>
-                    <button @click="saveCurrentNote()">保存</button>
-                    <button class="secondary" @click="exportCurrentNote">导出</button>
+                    <span class="note-save-status">{{ savedText }}</span>
+                    <button
+                      type="button"
+                      class="save-action"
+                      title="保存"
+                      aria-label="保存笔记"
+                      @click="saveCurrentNote()"
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3h8.2L16 5.3v10.2a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 15.5v-11Z"></path>
+                        <path d="M7 3v5h6V3"></path>
+                        <path d="M7 17v-5h6v5"></path>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="secondary"
+                      title="导出"
+                      aria-label="导出笔记"
+                      @click="exportCurrentNote"
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M10 3v9"></path>
+                        <path d="m6.5 8.5 3.5 3.5 3.5-3.5"></path>
+                        <path d="M4 16h12"></path>
+                      </svg>
+                    </button>
                   </div>
                 </div>
 
@@ -1691,7 +1961,9 @@ function getStatusClass(status: string) {
           ref="studyWorkspaceRef"
           class="course-study-workspace"
           :class="{
-            resizing: isResizingStudySplit,
+            resizing: isResizingStudySplit || isResizingStudySideSplit,
+            'resizing-horizontal': isResizingStudySplit,
+            'resizing-vertical': isResizingStudySideSplit,
             'lesson-panel-collapsed': isLessonPanelCollapsed,
             'note-position-right': studyNotePosition === 'right'
           }"
@@ -1701,8 +1973,26 @@ function getStatusClass(status: string) {
             <div class="lesson-header">
               <h2>课程目录</h2>
               <div class="lesson-header-actions">
-                <button type="button" @click="addLesson">+ 添加课节</button>
-                <button type="button" @click="toggleLessonPanel">收起</button>
+                <button
+                  type="button"
+                  class="lesson-header-icon-button"
+                  title="添加课节"
+                  aria-label="添加课节"
+                  @click="addLesson"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  class="lesson-header-icon-button"
+                  title="收起目录"
+                  aria-label="收起目录"
+                  @click="toggleLessonPanel"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="m12 4-6 6 6 6"></path>
+                  </svg>
+                </button>
               </div>
             </div>
 
@@ -1724,14 +2014,19 @@ function getStatusClass(status: string) {
             </div>
           </aside>
 
-          <button
-            v-else
-            class="lesson-expand-button"
-            type="button"
-            @click="toggleLessonPanel"
-          >
-            展开目录
-          </button>
+          <div v-else class="lesson-expand-rail" aria-hidden="false">
+            <button
+              class="lesson-expand-button"
+              type="button"
+              title="展开目录"
+              aria-label="展开目录"
+              @click="toggleLessonPanel"
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path d="m8 4 6 6-6 6"></path>
+              </svg>
+            </button>
+          </div>
 
           <section class="video-study-card">
             <div v-if="currentVideoUrl" class="video-player-card">
@@ -1793,10 +2088,27 @@ function getStatusClass(status: string) {
             <span></span>
           </button>
 
-          <section class="note-card">
+          <button
+            v-if="studyNotePosition === 'right'"
+            class="study-side-resize-handle"
+            type="button"
+            aria-label="调整课程区和笔记区宽度"
+            aria-orientation="vertical"
+            @pointerdown="startStudySideSplitResize"
+            @keydown="resizeStudySideSplitByKeyboard"
+          >
+            <span></span>
+          </button>
+
+          <section class="note-card note-theme">
             <div class="note-header">
               <span class="note-save-status">{{savedText}}</span>
               <div class="note-actions">
+                <AiNoteGenerator
+                  :video-url="currentVideoUrl"
+                  :platform="currentVideoGenerationPlatform"
+                  @append="appendGeneratedSummary"
+                />
                 <button
                   type="button"
                   class="secondary"
@@ -2188,6 +2500,10 @@ function getStatusClass(status: string) {
   z-index: 2;
 }
 
+.sidebar-collapsed .brand {
+  gap: 10px;
+}
+
 .collapsed-dock button {
   width: 42px;
   height: 42px;
@@ -2325,46 +2641,11 @@ function getStatusClass(status: string) {
   white-space: nowrap;
 }
 
-.brand-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: #eaf1ff;
-}
-
-.search-box {
-  width: 460px;
-  height: 44px;
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: #f9fafb;
-  border: 1px solid #dfe5ee;
-  border-radius: 10px;
-}
-
-.search-box input {
-  flex: 1;
-  border: none;
-  outline: none;
-  background: transparent;
-  font-size: 14px;
-}
-
-.search-icon {
-  opacity: 0.6;
-}
-
-.shortcut {
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: white;
-  color: #8a94a6;
-  font-size: 12px;
-  border: 1px solid #e5e7eb;
+.brand-logo {
+  width: 126px;
+  height: auto;
+  display: block;
+  object-fit: contain;
 }
 
 .layout {
@@ -2410,10 +2691,6 @@ function getStatusClass(status: string) {
   display: none;
 }
 
-.sidebar-collapsed .search-box {
-  display: none;
-}
-
 .menu {
   display: flex;
   flex-direction: column;
@@ -2426,6 +2703,7 @@ function getStatusClass(status: string) {
   display: flex;
   align-items: center;
   gap: 14px;
+  overflow: hidden;
   border: none;
   border-radius: 10px;
   background: transparent;
@@ -2433,6 +2711,7 @@ function getStatusClass(status: string) {
   font-size: 18px;
   font-weight: 600;
   text-align: left;
+  white-space: nowrap;
 }
 
 .menu-item.active {
@@ -2442,7 +2721,13 @@ function getStatusClass(status: string) {
 }
 
 .menu-icon {
+  flex: 0 0 auto;
   font-size: 24px;
+}
+
+.menu-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .content {
@@ -2455,16 +2740,101 @@ function getStatusClass(status: string) {
   overflow: hidden;
 }
 
-.settings-panel {
-  width: min(820px, 100%);
+.settings-page {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 20px;
+}
+
+.settings-navigation {
+  min-height: 0;
+  padding: 18px 14px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid #e1e7ef;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+
+.settings-nav-group {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-nav-item {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: #334155;
+  text-align: left;
+  font-weight: 700;
+  transition:
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.settings-nav-item span {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.settings-nav-item.active {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+
+.settings-nav-item:hover,
+.settings-nav-item:focus-visible {
+  background: #f8fafc;
+  color: #1f2937;
+  outline: none;
+}
+
+.settings-nav-item:focus-visible {
+  box-shadow: inset 0 0 0 1px #bfdbfe;
+}
+
+.settings-nav-item.active:hover,
+.settings-nav-item.active:focus-visible {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+
+.settings-nav-item.active span {
+  background: white;
+  color: #2563eb;
+}
+
+.settings-main {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .settings-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 18px;
 }
@@ -2472,14 +2842,21 @@ function getStatusClass(status: string) {
 .settings-header h1 {
   margin: 0;
   color: #111827;
-  font-size: 32px;
+  font-size: 28px;
 }
 
-.settings-header p,
 .shortcut-setting-row p,
 .shortcut-message {
   margin: 8px 0 0;
   color: #64748b;
+}
+
+.settings-module {
+  padding: 20px;
+  border: 1px solid #e1e7ef;
+  border-radius: 12px;
+  background: white;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
 }
 
 .reset-shortcuts-button,
@@ -2903,6 +3280,32 @@ function getStatusClass(status: string) {
   letter-spacing: 2px;
 }
 
+.note-theme {
+  --note-bg-primary: #ffffff;
+  --note-bg-secondary: rgba(255, 255, 255, 0.9);
+  --note-bg-tertiary: #f8fafc;
+  --note-bg-code: #f1f5f9;
+  --note-text-primary: #111827;
+  --note-text-secondary: #334155;
+  --note-text-muted: #64748b;
+  --note-accent-blue: #2563eb;
+  --note-accent-cyan: #0891b2;
+  --note-accent-green: #15803d;
+  --note-accent-yellow: #d97706;
+  --note-accent-orange: #ea580c;
+  --note-accent-red: #dc2626;
+  --note-accent-purple: #7c3aed;
+  --note-strong: #b91c1c;
+  --note-strong-em: #dc2626;
+  --note-border: #e1e7ef;
+  --note-hover-bg: rgba(37, 99, 235, 0.08);
+  --note-selection-bg: rgba(37, 99, 235, 0.18);
+  --note-shadow: rgba(15, 23, 42, 0.08);
+  --note-font-sans: 'LXGW WenKai', 'LXGW WenKai Screen R', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --note-font-heading: '霞鹜文楷 GB Medium', 'LXGW WenKai', serif;
+  --note-font-mono: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', Consolas, monospace;
+}
+
 .notes-workspace {
   height: 100%;
   min-height: 0;
@@ -2915,8 +3318,8 @@ function getStatusClass(status: string) {
 .notes-editor-panel,
 .notes-empty-state {
   min-height: 0;
-  background: white;
-  border: 1px solid #e1e7ef;
+  background: var(--note-bg-secondary);
+  border: 1px solid var(--note-border);
   border-radius: 10px;
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
 }
@@ -2934,20 +3337,21 @@ function getStatusClass(status: string) {
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 14px;
-  border-bottom: 1px solid #e5eaf3;
+  border-bottom: 1px solid var(--note-border);
 }
 
 .notes-folder-toolbar h1 {
   margin: 0;
-  color: #111827;
+  color: var(--note-text-primary);
   font-size: 24px;
+  font-family: var(--note-font-heading);
 }
 
 .notes-folder-toolbar span,
 .notes-folder-button small,
 .notes-lesson-button small,
 .notes-editor-topbar p {
-  color: #64748b;
+  color: var(--note-text-muted);
   font-size: 13px;
   font-weight: 700;
 }
@@ -2967,7 +3371,7 @@ function getStatusClass(status: string) {
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  color: #64748b;
+  color: var(--note-text-muted);
   transition:
     color 150ms ease,
     border-color 150ms ease,
@@ -2976,16 +3380,16 @@ function getStatusClass(status: string) {
 
 .notes-tree-action-button:hover,
 .notes-tree-action-button:focus-visible {
-  border-color: #dbe3ee;
-  background: #f8fafc;
-  color: #334155;
+  border-color: var(--note-border);
+  background: var(--note-hover-bg);
+  color: var(--note-text-primary);
   outline: none;
 }
 
 .notes-tree-action-button.active {
-  border-color: #bfdbfe;
-  background: #eff6ff;
-  color: #2563eb;
+  border-color: var(--note-accent-blue);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--note-text-primary);
 }
 
 .notes-tree-action-button svg {
@@ -3016,7 +3420,7 @@ function getStatusClass(status: string) {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #334155;
+  color: var(--note-text-secondary);
   text-align: left;
 }
 
@@ -3027,13 +3431,13 @@ function getStatusClass(status: string) {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 10px;
-  border: 1px solid #e5eaf3;
+  border: 1px solid var(--note-border);
 }
 
 .notes-folder-button.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--note-accent-blue);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--note-text-primary);
 }
 
 .notes-lesson-list-shell {
@@ -3087,14 +3491,14 @@ function getStatusClass(status: string) {
 }
 
 .notes-lesson-button.active {
-  background: #f8fafc;
-  color: #111827;
+  background: var(--note-hover-bg);
+  color: var(--note-text-primary);
   font-weight: 700;
 }
 
 .notes-empty-folder {
   margin: 8px 0;
-  color: #94a3b8;
+  color: var(--note-text-muted);
   font-size: 14px;
 }
 
@@ -3121,8 +3525,9 @@ function getStatusClass(status: string) {
 
 .notes-editor-topbar h1 {
   margin: 6px 0 0;
-  color: #111827;
+  color: var(--note-text-primary);
   font-size: 28px;
+  font-family: var(--note-font-heading);
 }
 
 .notes-editor-topbar p {
@@ -3145,6 +3550,25 @@ function getStatusClass(status: string) {
   display: grid;
   align-content: center;
   justify-items: start;
+  color: var(--note-text-secondary);
+}
+
+.notes-empty-state h1 {
+  color: var(--note-text-primary);
+  font-family: var(--note-font-heading);
+}
+
+.notes-empty-state p {
+  color: var(--note-text-muted);
+}
+
+.notes-workspace .add-button {
+  background: var(--note-accent-blue);
+}
+
+.notes-workspace .add-button:hover,
+.notes-workspace .add-button:focus-visible {
+  background: #1d4ed8;
 }
 
 .notes-empty-state.inline {
@@ -3164,10 +3588,6 @@ function getStatusClass(status: string) {
 }
 
 @media (max-width: 1100px) {
-  .search-box {
-    width: 340px;
-  }
-
   .course-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3184,10 +3604,6 @@ function getStatusClass(status: string) {
     font-size: 20px;
   }
 
-  .search-box {
-    display: none;
-  }
-
   .layout {
     grid-template-columns: 1fr;
   }
@@ -3197,7 +3613,6 @@ function getStatusClass(status: string) {
   }
 
   .collapsed-dock {
-    margin-left: auto;
     padding: 5px 8px;
     gap: 4px;
   }
@@ -3218,6 +3633,25 @@ function getStatusClass(status: string) {
 
   .notes-folder-panel {
     max-height: 340px;
+  }
+
+  .settings-page {
+    height: auto;
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .settings-navigation {
+    padding: 14px;
+  }
+
+  .settings-nav-group {
+    padding: 14px 0;
+  }
+
+  .settings-main {
+    overflow: visible;
+    padding-right: 0;
   }
 }
 
@@ -3265,6 +3699,20 @@ function getStatusClass(status: string) {
     display: inline-block;
     margin-bottom: 10px;
   }
+
+  .settings-header {
+    display: grid;
+  }
+
+  .shortcut-setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shortcut-setting-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 
 @media (max-height: 800px) {
@@ -3308,33 +3756,42 @@ function getStatusClass(status: string) {
 }
 
 .course-study-workspace.note-position-right {
-  grid-template-columns: minmax(220px, 240px) minmax(0, 1fr) minmax(320px, 380px);
-  column-gap: var(--panel-gap);
+  column-gap: 0;
 }
 
 .course-study-workspace.note-position-right.lesson-panel-collapsed {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  column-gap: 0;
 }
 
 .course-study-workspace.resizing {
   user-select: none;
+}
+
+.course-study-workspace.resizing .video-iframe {
+  pointer-events: none;
+}
+
+.course-study-workspace.resizing-horizontal {
   cursor: row-resize;
+}
+
+.course-study-workspace.resizing-vertical {
+  cursor: col-resize;
 }
 
 .lesson-panel,
 .video-study-card,
 .note-card {
-  background: white;
-  border: 1px solid #e1e7ef;
+  background: #fbfdff;
+  border: 1px solid #e5eaf3;
   border-radius: 10px;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
 }
 
 .lesson-panel {
   min-height: 0;
   grid-column: 1;
   grid-row: 1;
-  padding: var(--panel-padding);
+  padding: 14px 12px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -3344,79 +3801,156 @@ function getStatusClass(status: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 14px;
+  gap: 10px;
+  padding: 0 2px 12px;
   border-bottom: 1px solid #e5eaf3;
 }
 
 .lesson-header h2 {
   margin: 0;
-  font-size: 18px;
+  color: #334155;
+  font-size: 17px;
+  font-weight: 700;
 }
 
 .lesson-header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
-.lesson-header button {
-  border: none;
+.lesson-header-icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
   color: #64748b;
-  font-size: 14px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.lesson-header-icon-button:hover,
+.lesson-header-icon-button:focus-visible {
+  border-color: #dbe3ee;
+  background: white;
+  color: #2563eb;
+  outline: none;
+}
+
+.lesson-header-icon-button svg,
+.lesson-expand-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lesson-expand-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  width: 42px;
 }
 
 .lesson-expand-button {
   position: absolute;
   top: 16px;
-  left: 16px;
-  z-index: 2;
-  height: 34px;
-  padding: 0 12px;
+  left: 10px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
   border: 1px solid #dbe3ee;
-  border-radius: 999px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.94);
   color: #475569;
-  font-weight: 700;
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  opacity: 0;
+  transform: translateX(-10px) scale(0.96);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
   backdrop-filter: blur(10px);
+  pointer-events: none;
+  transition:
+    opacity 160ms ease,
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 240ms ease,
+    background-color 240ms ease;
+}
+
+.lesson-expand-rail:hover .lesson-expand-button,
+.lesson-expand-button:focus-visible {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  pointer-events: auto;
+}
+
+.lesson-expand-button:hover,
+.lesson-expand-button:focus-visible {
+  background: white;
+  color: #2563eb;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+  outline: none;
 }
 
 .lesson-list {
   min-height: 0;
   margin-top: 10px;
+  display: grid;
+  align-content: start;
+  gap: 4px;
   overflow: auto;
 }
 
 .lesson-item {
   width: 100%;
-  min-height: 76px;
-  padding: 14px 12px;
+  min-height: 48px;
+  padding: 10px 12px;
   display: flex;
   align-items: center;
   border: none;
-  border-bottom: 1px solid #e5eaf3;
-  background: white;
+  border-radius: 8px;
+  background: transparent;
   text-align: left;
-  color: #111827;
+  color: #334155;
+}
+
+.lesson-item:hover,
+.lesson-item:focus-visible {
+  background: #f8fafc;
+  outline: none;
 }
 
 .lesson-item strong {
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .lesson-item p {
-  margin: 8px 0 0;
+  margin: 5px 0 0;
   color: #2563eb;
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .lesson-item.active {
-  border: 1px solid #2563eb;
-  border-radius: 8px;
   background: #eff6ff;
+  color: #0f172a;
+  box-shadow: inset 2px 0 0 #2563eb;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lesson-expand-button {
+    transition: none;
+  }
 }
 
 .video-study-card {
@@ -3424,7 +3958,8 @@ function getStatusClass(status: string) {
   min-height: 0;
   grid-column: 2;
   grid-row: 1;
-  padding: var(--panel-padding);
+  padding: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -3436,6 +3971,8 @@ function getStatusClass(status: string) {
 .course-study-workspace.note-position-right .video-study-card {
   grid-column: 2;
   grid-row: 1;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .course-study-workspace.note-position-right.lesson-panel-collapsed .video-study-card {
@@ -3460,8 +3997,8 @@ function getStatusClass(status: string) {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid #dbe3ee;
-  border-radius: 10px;
+  border: none;
+  border-radius: 0;
   background: #0f172a;
   display: flex;
   flex-direction: column;
@@ -3546,15 +4083,19 @@ function getStatusClass(status: string) {
   padding: var(--panel-padding);
   display: flex;
   flex-direction: column;
+  background: var(--note-bg-secondary);
+  border-color: var(--note-border);
 }
 
 .course-study-workspace.note-position-right .note-card {
-  grid-column: 3;
+  grid-column: 4;
   grid-row: 1;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 .course-study-workspace.note-position-right.lesson-panel-collapsed .note-card {
-  grid-column: 2;
+  grid-column: 3;
 }
 
 .note-header {
@@ -3567,7 +4108,7 @@ function getStatusClass(status: string) {
 }
 
 .note-save-status {
-  color: #64748b;
+  color: var(--note-text-muted);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -3579,7 +4120,7 @@ function getStatusClass(status: string) {
   flex-shrink: 0;
 }
 
-.note-actions button {
+.note-actions button:not(.ai-note-trigger) {
   width: 28px;
   height: 28px;
   padding: 0;
@@ -3587,32 +4128,44 @@ function getStatusClass(status: string) {
   place-items: center;
   border: none;
   border-radius: 7px;
-  background: #2563eb;
+  background: var(--note-accent-blue);
   color: white;
 }
 
 .note-actions button.secondary {
-  border: 1px solid #dbe3ee;
-  background: white;
-  color: #334155;
+  border: 1px solid var(--note-border);
+  background: transparent;
+  color: var(--note-text-secondary);
 }
 
-.note-actions button:hover,
-.note-actions button:focus-visible {
+.note-actions button:not(.ai-note-trigger):hover,
+.note-actions button:not(.ai-note-trigger):focus-visible {
   transform: translateY(-1px);
   outline: none;
 }
 
 .note-actions button.secondary:hover,
 .note-actions button.secondary:focus-visible {
-  border-color: #bfdbfe;
-  background: #f8fbff;
-  color: #2563eb;
+  border-color: var(--note-accent-blue);
+  background: var(--note-hover-bg);
+  color: var(--note-text-primary);
 }
 
 .note-actions button.save-action:hover,
 .note-actions button.save-action:focus-visible {
   background: #1d4ed8;
+}
+
+.note-card :deep(.ai-note-trigger) {
+  border-color: rgba(37, 99, 235, 0.25);
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--note-text-primary);
+}
+
+.note-card :deep(.ai-note-trigger:disabled) {
+  border-color: var(--note-border);
+  background: transparent;
+  color: var(--note-text-muted);
 }
 
 .note-actions svg {
@@ -3628,10 +4181,10 @@ function getStatusClass(status: string) {
 .wysiwyg-note-editor {
   flex: 1;
   min-height: 0;
-  border: 1px solid #e1e7ef;
+  border: 1px solid var(--note-border, #e1e7ef);
   border-radius: 8px;
   overflow: hidden;
-  background: white;
+  background: var(--note-bg-primary, white);
 }
 
 .note-editor-content {
@@ -3642,51 +4195,95 @@ function getStatusClass(status: string) {
 .wysiwyg-note-editor :deep(.tiptap) {
   height: 100%;
   min-height: 0;
-  padding: 20px;
+  padding: 28px clamp(22px, 4vw, 56px);
   overflow: auto;
   outline: none;
-  color: #111827;
-  font-size: 15px;
+  color: var(--note-text-primary, #111827);
+  font-family: var(--note-font-sans, inherit);
+  font-size: 16px;
   line-height: 1.75;
+  caret-color: var(--note-text-muted, currentColor);
+}
+
+.wysiwyg-note-editor :deep(.tiptap::selection),
+.wysiwyg-note-editor :deep(.tiptap *::selection) {
+  background: var(--note-selection-bg, rgba(94, 129, 172, 0.3));
+  color: var(--note-text-primary, inherit);
 }
 
 .wysiwyg-note-editor :deep(.tiptap p) {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
 }
 
 .wysiwyg-note-editor :deep(.tiptap h1),
 .wysiwyg-note-editor :deep(.tiptap h2),
-.wysiwyg-note-editor :deep(.tiptap h3) {
-  margin: 18px 0 10px;
-  color: #0f172a;
-  line-height: 1.25;
+.wysiwyg-note-editor :deep(.tiptap h3),
+.wysiwyg-note-editor :deep(.tiptap h4),
+.wysiwyg-note-editor :deep(.tiptap h5),
+.wysiwyg-note-editor :deep(.tiptap h6) {
+  margin: 28px 0 16px;
+  font-family: var(--note-font-heading, inherit);
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .wysiwyg-note-editor :deep(.tiptap h1) {
-  font-size: 28px;
+  margin-top: 0;
+  padding-bottom: 8px;
+  border-bottom: 3px solid var(--note-accent-red);
+  color: var(--note-accent-red);
+  font-size: 1.7625em;
 }
 
 .wysiwyg-note-editor :deep(.tiptap h2) {
-  font-size: 23px;
+  padding-bottom: 5px;
+  border-bottom: 2px solid var(--note-accent-orange);
+  color: var(--note-accent-orange);
+  font-size: 1.6375em;
 }
 
 .wysiwyg-note-editor :deep(.tiptap h3) {
-  font-size: 19px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--note-accent-yellow);
+  color: var(--note-accent-yellow);
+  font-size: 1.5125em;
+}
+
+.wysiwyg-note-editor :deep(.tiptap h4) {
+  color: var(--note-accent-green);
+  font-size: 1.3875em;
+}
+
+.wysiwyg-note-editor :deep(.tiptap h5) {
+  color: var(--note-accent-purple);
+  font-size: 1.2625em;
+}
+
+.wysiwyg-note-editor :deep(.tiptap h6) {
+  color: var(--note-text-muted);
+  font-size: 1em;
+  font-weight: 400;
 }
 
 .wysiwyg-note-editor :deep(.tiptap pre) {
-  padding: 12px 14px;
+  margin: 24px 0;
+  padding: 14px 16px;
   overflow: auto;
-  border-radius: 8px;
-  background: #0f172a;
-  color: #e2e8f0;
+  border-radius: 6px;
+  background: var(--note-bg-code);
+  color: var(--note-text-primary);
+  font-family: var(--note-font-mono, monospace);
+  line-height: 1.6;
+  box-shadow: 0 0 10px var(--note-shadow);
 }
 
 .wysiwyg-note-editor :deep(.tiptap code) {
-  padding: 2px 5px;
-  border-radius: 5px;
-  background: #f1f5f9;
-  color: #be123c;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--note-bg-code);
+  color: var(--note-accent-cyan);
+  font-family: var(--note-font-mono, monospace);
+  font-size: 0.9em;
 }
 
 .wysiwyg-note-editor :deep(.tiptap pre code) {
@@ -3696,15 +4293,134 @@ function getStatusClass(status: string) {
 }
 
 .wysiwyg-note-editor :deep(.tiptap blockquote) {
-  margin: 14px 0;
-  padding-left: 14px;
-  border-left: 3px solid #93c5fd;
-  color: #475569;
+  margin: 24px 0;
+  padding: 16px 20px;
+  border-left: 4px solid var(--note-accent-blue);
+  border-radius: 0 6px 6px 0;
+  background: rgba(94, 129, 172, 0.1);
+  color: var(--note-text-secondary);
+  font-style: italic;
+}
+
+.wysiwyg-note-editor :deep(.tiptap strong) {
+  color: var(--note-strong);
+  font-family: var(--note-font-heading, inherit);
+}
+
+.wysiwyg-note-editor :deep(.tiptap em) {
+  color: var(--note-accent-green);
+}
+
+.wysiwyg-note-editor :deep(.tiptap strong em),
+.wysiwyg-note-editor :deep(.tiptap em strong) {
+  color: var(--note-strong-em);
+}
+
+.wysiwyg-note-editor :deep(.tiptap a) {
+  color: var(--note-accent-blue);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.wysiwyg-note-editor :deep(.tiptap a:hover) {
+  color: var(--note-accent-cyan);
+  border-bottom-color: var(--note-accent-cyan);
+}
+
+.wysiwyg-note-editor :deep(.tiptap ul),
+.wysiwyg-note-editor :deep(.tiptap ol) {
+  margin: 16px 0;
+  padding-left: 32px;
+}
+
+.wysiwyg-note-editor :deep(.tiptap li) {
+  margin: 8px 0;
+}
+
+.wysiwyg-note-editor :deep(.tiptap ol li::marker) {
+  color: var(--note-accent-blue);
+  font-family: var(--note-font-heading, inherit);
+  font-weight: 600;
+}
+
+.wysiwyg-note-editor :deep(.tiptap hr) {
+  height: 2px;
+  margin: 32px 0;
+  border: none;
+  background: linear-gradient(90deg, transparent, var(--note-accent-blue), transparent);
+}
+
+.wysiwyg-note-editor :deep(.tiptap mark) {
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(235, 203, 139, 0.3);
+  color: var(--note-text-primary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap table) {
+  width: 100%;
+  margin: 24px 0;
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--note-bg-secondary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap th),
+.wysiwyg-note-editor :deep(.tiptap td) {
+  padding: 12px 16px;
+  border: 1px solid var(--note-border);
+  text-align: left;
+}
+
+.wysiwyg-note-editor :deep(.tiptap th) {
+  color: var(--note-text-primary);
+  font-family: var(--note-font-heading, inherit);
+}
+
+.wysiwyg-note-editor :deep(.tiptap td) {
+  color: var(--note-text-secondary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap tr:nth-child(odd)) {
+  background: var(--note-bg-primary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap tr:nth-child(even)) {
+  background: var(--note-bg-secondary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap img) {
+  max-width: 100%;
+  height: auto;
+  margin: 16px 0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px var(--note-shadow);
+}
+
+.wysiwyg-note-editor :deep(.tiptap::-webkit-scrollbar) {
+  width: 8px;
+  height: 8px;
+}
+
+.wysiwyg-note-editor :deep(.tiptap::-webkit-scrollbar-track) {
+  background: var(--note-bg-secondary);
+}
+
+.wysiwyg-note-editor :deep(.tiptap::-webkit-scrollbar-thumb) {
+  border-radius: 4px;
+  background: var(--note-border);
+}
+
+.wysiwyg-note-editor :deep(.tiptap::-webkit-scrollbar-thumb:hover) {
+  background: var(--note-accent-blue);
 }
 
 .study-resize-handle {
   grid-column: 1 / -1;
   grid-row: 2;
+  position: relative;
+  z-index: 2;
   width: 100%;
   height: 8px;
   border: none;
@@ -3712,6 +4428,13 @@ function getStatusClass(status: string) {
   display: grid;
   place-items: center;
   cursor: row-resize;
+  touch-action: none;
+}
+
+.study-resize-handle::before {
+  position: absolute;
+  inset: -8px 0;
+  content: '';
 }
 
 .study-resize-handle span {
@@ -3735,12 +4458,59 @@ function getStatusClass(status: string) {
   display: none;
 }
 
+.course-study-workspace.note-position-right .lesson-panel {
+  margin-right: var(--panel-gap);
+}
+
+.study-side-resize-handle {
+  grid-column: 3;
+  grid-row: 1;
+  position: relative;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  display: grid;
+  place-items: stretch center;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.study-side-resize-handle::before {
+  position: absolute;
+  inset: 0 -8px;
+  content: '';
+}
+
+.course-study-workspace.note-position-right.lesson-panel-collapsed .study-side-resize-handle {
+  grid-column: 2;
+}
+
+.study-side-resize-handle span {
+  width: 1px;
+  height: 100%;
+  background: #cbd5e1;
+  transition:
+    width 150ms ease,
+    background 150ms ease;
+}
+
+.study-side-resize-handle:hover span,
+.study-side-resize-handle:focus-visible span,
+.course-study-workspace.resizing-vertical .study-side-resize-handle span {
+  width: 2px;
+  background: #2563eb;
+}
+
 .fullscreen-active .top-bar,
 .fullscreen-active .sidebar,
 .fullscreen-active .collapsed-dock,
 .fullscreen-active .lesson-panel,
 .fullscreen-active .lesson-expand-button,
-.fullscreen-active .study-resize-handle {
+.fullscreen-active .study-resize-handle,
+.fullscreen-active .study-side-resize-handle {
   display: none;
 }
 
@@ -3770,10 +4540,17 @@ function getStatusClass(status: string) {
 .fullscreen-active .video-study-card,
 .fullscreen-active .note-card {
   height: 100vh;
-  padding: 18px;
   border: none;
   border-radius: 0;
   box-shadow: none;
+}
+
+.fullscreen-active .video-study-card {
+  padding: 0;
+}
+
+.fullscreen-active .note-card {
+  padding: 18px;
 }
 
 .fullscreen-active .note-header {
@@ -3834,6 +4611,10 @@ function getStatusClass(status: string) {
   }
 
   .study-resize-handle {
+    display: none;
+  }
+
+  .study-side-resize-handle {
     display: none;
   }
 

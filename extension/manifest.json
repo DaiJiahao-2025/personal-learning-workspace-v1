@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "LearnFlow B站字幕助手",
+  "version": "0.1.0",
+  "description": "同步 B 站登录态并把当前视频字幕预抓到本地 LearnFlow 后端。",
+  "permissions": ["activeTab", "cookies", "tabs"],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "http://127.0.0.1:8483/*",
+    "http://localhost:8483/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "同步当前 B 站字幕"
+  }
+}
