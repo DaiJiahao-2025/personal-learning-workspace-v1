@@ -86,6 +86,13 @@ def _pick_requested_subtitle(
     return None
 
 
+def _subtitle_languages_for_download(preferred_languages: list[str]) -> list[str]:
+    languages = list(dict.fromkeys(language for language in preferred_languages if language))
+    if "all" not in languages:
+        languages.append("all")
+    return languages
+
+
 def _seconds_from_timestamp(value: str) -> float:
     hours, minutes, seconds = value.replace(",", ".").split(":")
     return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
@@ -190,7 +197,7 @@ def _download_subtitles_sync(
     options: dict[str, Any] = {
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": preferred_languages,
+        "subtitleslangs": _subtitle_languages_for_download(preferred_languages),
         "subtitlesformat": "json3/srt/vtt/best",
         "skip_download": True,
         "outtmpl": output_template,

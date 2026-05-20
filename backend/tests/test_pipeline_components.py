@@ -2,10 +2,11 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend.app.downloaders import get_downloader
 from backend.app.downloaders.bilibili import BilibiliDownloader
+from backend.app.downloaders.common import _subtitle_languages_for_download
 from backend.app.downloaders.youtube import YouTubeDownloader
 from backend.app.gpt.request_chunker import RequestChunker
 from backend.app.models import (
@@ -16,7 +17,7 @@ from backend.app.models import (
     VideoNoteRequest,
 )
 from backend.app.storage import create_task_record, get_task_snapshot, init_db, update_task_status
-from backend.app.subtitles import SubtitleUnavailableError
+from backend.app.subtitles import SubtitleBlockedError, SubtitleUnavailableError
 from backend.app.transcribers.groq import GroqTranscriber
 from backend.app.transcribers.local_whisper import LocalWhisperTranscriber
 from backend.app.transcribers.openai_compatible import OpenAICompatibleTranscriber
@@ -116,3 +117,38 @@ class PipelineComponentTests(unittest.TestCase):
             )
 
         self.assertEqual(result, transcript)
+
+    def test_subtitle_fallback_downloads_all_languages_after_preferences(self) -> None:
+        languages = _subtitle_languages_for_download(["zh-Hans", "zh", "en"])
+
+        self.assertEqual(languages, ["zh-Hans", "zh", "en", "all"])
+
+    def test_youtube_downloader_propagates_blocked_direct_subtitle_errors(self) -> None:
+        fallback = AsyncMock()
+
+        with patch(
+            "backend.app.downloaders.youtube.fetch_youtube_transcript",
+            side_effect=SubtitleBlockedError("blocked"),
+        ), patch("backend.app.downloaders.youtube.download_subtitles", fallback):
+            with self.assertRaises(SubtitleBlockedError):
+                asyncio.run(
+                    YouTubeDownloader().fetch_transcript("https://www.youtube.com/watch?v=abc123")
+                )
+
+        fallback.assert_not_called()
+
+    def test_youtube_downloader_propagates_blocked_fallback_subtitle_errors(self) -> None:
+        async def blocked_download_subtitles(*_args, **_kwargs):
+            raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+        with patch(
+            "backend.app.downloaders.youtube.fetch_youtube_transcript",
+            side_effect=SubtitleUnavailableError("no direct subtitle"),
+        ), patch(
+            "backend.app.downloaders.youtube.download_subtitles",
+            blocked_download_subtitles,
+        ):
+            with self.assertRaises(SubtitleBlockedError):
+                asyncio.run(
+                    YouTubeDownloader().fetch_transcript("https://www.youtube.com/watch?v=abc123")
+                )

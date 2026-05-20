@@ -83,6 +83,7 @@ class VideoNoteTaskTests(unittest.TestCase):
         ):
             init_db()
             request = self._request()
+            request = request.model_copy(update={"stt_provider": "local_whisper"})
             task_id = create_task(request)
             with patch("backend.app.tasks.get_downloader", return_value=downloader), patch(
                 "backend.app.tasks.load_ai_config",
@@ -95,6 +96,7 @@ class VideoNoteTaskTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.status, TaskStatus.SUCCESS)
         self.assertEqual(task.note.title, "测试标题")
+        self.assertEqual(task.transcript_source, "native_subtitle")
         self.assertFalse(downloader.audio_extracted)
 
     def test_task_falls_back_to_transcription_when_subtitle_is_unavailable(self) -> None:

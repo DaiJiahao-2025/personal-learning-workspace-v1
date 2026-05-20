@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type { User } from '@supabase/supabase-js'
 import { EditorContent, useEditor } from '@tiptap/vue-3';
 import StarterKit from '@tiptap/starter-kit';
 import { marked } from 'marked';
@@ -9,6 +10,17 @@ import AiConfigSettings from './components/AiConfigSettings.vue'
 import AiNoteGenerator from './components/AiNoteGenerator.vue'
 import DownloaderConfigSettings from './components/DownloaderConfigSettings.vue'
 import TranscriptionConfigSettings from './components/TranscriptionConfigSettings.vue'
+import {
+  getCurrentSession,
+  loadRemoteWorkbenchState,
+  onAuthStateChange,
+  saveRemoteWorkbenchState,
+  signInWithEmail,
+  signOut,
+  signUpWithEmail,
+  supabaseConfigError,
+  type WorkbenchState
+} from './services/supabaseClient'
 import type { VideoNotePlatform } from './services/videoNotes'
 
 type YoutubePlayer = {
@@ -28,11 +40,47 @@ declare global {
 }
 
 const activeMenu = ref('课程管理')
+const authUser = ref<User | null>(null)
+const authLoading = ref(true)
+const authMode = ref<'login' | 'register'>('login')
+const authEmail = ref('')
+const authPassword = ref('')
+const authError = ref('')
+const authMessage = ref('')
+const isAuthSubmitting = ref(false)
+const syncStatus = ref('')
+const syncError = ref('')
+const accountEmail = computed(() => authUser.value?.email ?? '')
+let stopAuthSubscription: (() => void) | undefined
+let remoteSyncTimer: ReturnType<typeof setTimeout> | undefined
+let syncedUserId = ''
+let isApplyingRemoteState = false
+let hasCompletedInitialRemoteSync = false
+
 const isSidebarCollapsed = ref(false)
-const menuItems = [
-  { name: '课程管理', icon: '📘'},
-  { name: '笔记管理', icon: '📄'},
-  { name: '设置', icon: '⚙️',}
+const iconPaths = {
+  course: ['M4.5 5.2A2.2 2.2 0 0 1 6.7 3h8.8v14H6.7a2.2 2.2 0 0 0-2.2 2.2v-14Z', 'M4.5 5.2v14A2.2 2.2 0 0 1 6.7 17h8.8'],
+  note: ['M6 3.5h6.8L16 6.7v9.8A2 2 0 0 1 14 18.5H6a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z', 'M12.5 3.5V7H16', 'M7 11h6', 'M7 14h4'],
+  settings: ['M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z', 'M3.8 11.6l1.4.8.4 1.1-.5 1.5 1.4 1.4 1.5-.5 1.1.4.8 1.4h2l.8-1.4 1.1-.4 1.5.5 1.4-1.4-.5-1.5.4-1.1 1.4-.8v-2l-1.4-.8-.4-1.1.5-1.5-1.4-1.4-1.5.5-1.1-.4-.8-1.4h-2l-.8 1.4-1.1.4-1.5-.5-1.4 1.4.5 1.5-.4 1.1-1.4.8v2Z'],
+  shortcuts: ['M6 6h8', 'M6 10h8', 'M6 14h5', 'M4 3.5h12A1.5 1.5 0 0 1 17.5 5v10A1.5 1.5 0 0 1 16 16.5H4A1.5 1.5 0 0 1 2.5 15V5A1.5 1.5 0 0 1 4 3.5Z'],
+  ai: ['M10 3.5l1.2 3.2 3.3 1.1-3.3 1.2L10 12.2 8.8 9 5.5 7.8l3.3-1.1L10 3.5Z', 'M15 12.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6.6-1.6Z'],
+  transcription: ['M10 3.5a3 3 0 0 0-3 3V10a3 3 0 0 0 6 0V6.5a3 3 0 0 0-3-3Z', 'M5 9.5V10a5 5 0 0 0 10 0v-.5', 'M10 15v2.5', 'M7.5 17.5h5'],
+  download: ['M10 3.5v8', 'm6.8 8.6 3.2 3.2 3.2-3.2', 'M4.5 16.5h11'],
+  folder: ['M3.5 16.5V6.8A1.8 1.8 0 0 1 5.3 5h4l1.8 2h5.6a1.8 1.8 0 0 1 1.8 1.8v7.7a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8Z'],
+  video: ['M4 5.5A1.5 1.5 0 0 1 5.5 4h9A1.5 1.5 0 0 1 16 5.5v9A1.5 1.5 0 0 1 14.5 16h-9A1.5 1.5 0 0 1 4 14.5v-9Z', 'm8.5 7 4.2-2.5-4.2-2.5v5Z'],
+  play: ['M7 5.5v9l7-4.5-7-4.5Z'],
+  volume: ['M4 8.3h2.8L10 5.5v9l-3.2-2.8H4V8.3Z', 'M13 7.2a4.2 4.2 0 0 1 0 5.6', 'M15 5.5a7 7 0 0 1 0 9'],
+  fullscreen: ['M6.8 4H4v2.8', 'M13.2 4H16v2.8', 'M16 13.2V16h-2.8', 'M6.8 16H4v-2.8'],
+  plus: ['M10 4.5v11', 'M4.5 10h11'],
+  close: ['M5.5 5.5 14.5 14.5', 'M14.5 5.5 5.5 14.5'],
+  more: ['M5.5 10h.1', 'M10 10h.1', 'M14.5 10h.1']
+} as const
+type IconName = keyof typeof iconPaths
+
+const menuItems: { name: string; icon: IconName }[] = [
+  { name: '课程管理', icon: 'course' },
+  { name: '笔记管理', icon: 'note' },
+  { name: '设置', icon: 'settings' }
 ]
 const courseMenuName = menuItems[0].name
 const noteMenuName = menuItems[1].name
@@ -44,7 +92,7 @@ const settingsGroups: {
   items: {
     id: SettingsSectionId
     label: string
-    icon: string
+    icon: IconName
     description: string
   }[]
 }[] = [
@@ -54,7 +102,7 @@ const settingsGroups: {
       {
         id: 'shortcuts',
         label: '快捷键',
-        icon: '⌘',
+        icon: 'shortcuts',
         description: '配置学习时最常用的区域全屏操作。'
       }
     ]
@@ -65,13 +113,13 @@ const settingsGroups: {
       {
         id: 'ai',
         label: 'AI 生成',
-        icon: '✦',
+        icon: 'ai',
         description: '管理摘要生成所使用的模型服务。'
       },
       {
         id: 'transcription',
         label: '转写配置',
-        icon: '◌',
+        icon: 'transcription',
         description: '设置无字幕视频时使用的音频转写服务。'
       }
     ]
@@ -82,7 +130,7 @@ const settingsGroups: {
       {
         id: 'download',
         label: '下载配置',
-        icon: '↓',
+        icon: 'download',
         description: '配置字幕读取、音频下载与网络代理。'
       }
     ]
@@ -239,6 +287,7 @@ function loadSavedCourses() {
 
 function saveCourses() {
   localStorage.setItem(COURSE_STORAGE_KEY, JSON.stringify(courses.value))
+  queueWorkbenchSync()
 }
 
 const courses = ref<Course[]>(loadSavedCourses())
@@ -384,6 +433,7 @@ function loadSavedShortcuts() {
 
 function saveShortcuts() {
   localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(shortcuts.value))
+  queueWorkbenchSync()
 }
 
 function clampStudySplitRatio(ratio: number) {
@@ -398,6 +448,7 @@ function loadSavedStudySplitRatio() {
 
 function saveStudySplitRatio() {
   localStorage.setItem(STUDY_SPLIT_STORAGE_KEY, String(studySplitRatio.value))
+  queueWorkbenchSync()
 }
 
 function loadSavedStudySideNotesWidth() {
@@ -409,6 +460,7 @@ function loadSavedStudySideNotesWidth() {
 
 function saveStudySideNotesWidth() {
   localStorage.setItem(STUDY_SIDE_NOTES_WIDTH_STORAGE_KEY, String(studySideNotesWidth.value))
+  queueWorkbenchSync()
 }
 
 function isStudyNotePosition(value: string | null): value is StudyNotePosition {
@@ -422,6 +474,244 @@ function loadSavedStudyNotePosition() {
 
 function saveStudyNotePosition() {
   localStorage.setItem(STUDY_NOTE_POSITION_STORAGE_KEY, studyNotePosition.value)
+  queueWorkbenchSync()
+}
+
+function collectWorkbenchState(): WorkbenchState {
+  syncCurrentNoteFromEditor()
+
+  const notes: Record<string, string> = {}
+  const videos: Record<string, string> = {}
+
+  for (const course of courses.value) {
+    for (const lesson of course.lessons) {
+      const noteKey = getCourseNoteKey(course.id, lesson.id)
+      const videoKey = getCourseVideoKey(course.id, lesson.id)
+      const note = localStorage.getItem(noteKey)
+      const video = localStorage.getItem(videoKey)
+
+      if (note !== null) notes[noteKey] = note
+      if (video !== null) videos[videoKey] = video
+    }
+  }
+
+  return {
+    courses: courses.value,
+    notes,
+    videos,
+    shortcuts: shortcuts.value,
+    studySplitRatio: studySplitRatio.value,
+    studySideNotesWidth: studySideNotesWidth.value,
+    studyNotePosition: studyNotePosition.value
+  }
+}
+
+function hasLocalWorkbenchState() {
+  const state = collectWorkbenchState()
+
+  return (
+    state.courses.length > 0 ||
+    Object.keys(state.notes).length > 0 ||
+    Object.keys(state.videos).length > 0
+  )
+}
+
+function clearCourseScopedStorage() {
+  for (const course of courses.value) {
+    for (const lesson of course.lessons) {
+      localStorage.removeItem(getCourseNoteKey(course.id, lesson.id))
+      localStorage.removeItem(getCourseVideoKey(course.id, lesson.id))
+    }
+  }
+}
+
+function applyWorkbenchState(state: WorkbenchState) {
+  isApplyingRemoteState = true
+
+  try {
+    clearCourseScopedStorage()
+
+    const nextCourses = Array.isArray(state.courses)
+      ? state.courses.map(normalizeCourse).filter((course): course is Course => Boolean(course))
+      : []
+    courses.value = nextCourses
+    localStorage.setItem(COURSE_STORAGE_KEY, JSON.stringify(courses.value))
+
+    for (const [key, value] of Object.entries(state.notes ?? {})) {
+      if (typeof value === 'string') localStorage.setItem(key, value)
+    }
+
+    for (const [key, value] of Object.entries(state.videos ?? {})) {
+      if (typeof value === 'string') localStorage.setItem(key, value)
+    }
+
+    const remoteShortcuts = state.shortcuts as Partial<Record<ShortcutAction, ShortcutBinding>> | null
+    if (remoteShortcuts) {
+      shortcuts.value = {
+        videoFullscreen: isShortcutBinding(remoteShortcuts.videoFullscreen) ? remoteShortcuts.videoFullscreen : defaultShortcuts.videoFullscreen,
+        notesFullscreen: isShortcutBinding(remoteShortcuts.notesFullscreen) ? remoteShortcuts.notesFullscreen : defaultShortcuts.notesFullscreen,
+        exitFullscreen: isShortcutBinding(remoteShortcuts.exitFullscreen) ? remoteShortcuts.exitFullscreen : defaultShortcuts.exitFullscreen
+      }
+      saveShortcuts()
+    }
+
+    if (typeof state.studySplitRatio === 'number') {
+      studySplitRatio.value = clampStudySplitRatio(state.studySplitRatio)
+      localStorage.setItem(STUDY_SPLIT_STORAGE_KEY, String(studySplitRatio.value))
+    }
+
+    if (typeof state.studySideNotesWidth === 'number' && Number.isFinite(state.studySideNotesWidth)) {
+      studySideNotesWidth.value = Math.max(STUDY_NOTES_MIN_WIDTH, state.studySideNotesWidth)
+      localStorage.setItem(STUDY_SIDE_NOTES_WIDTH_STORAGE_KEY, String(studySideNotesWidth.value))
+    }
+
+    if (isStudyNotePosition(state.studyNotePosition)) {
+      studyNotePosition.value = state.studyNotePosition
+      localStorage.setItem(STUDY_NOTE_POSITION_STORAGE_KEY, studyNotePosition.value)
+    }
+
+    selectedCourse.value = selectedCourse.value
+      ? courses.value.find((course) => course.id === selectedCourse.value?.id) ?? null
+      : null
+    selectedLesson.value = selectedCourse.value?.lessons.find((lesson) => lesson.id === selectedLesson.value.id)
+      ?? selectedCourse.value?.lessons[0]
+      ?? cloneDefaultLessons()[0]
+
+    if (!selectedCourse.value) {
+      currentPage.value = 'courseList'
+      currentVideoUrl.value = ''
+    }
+
+    initializeNoteWorkspace()
+    loadCurrentVideo()
+    loadCurrentNote()
+  } finally {
+    isApplyingRemoteState = false
+  }
+}
+
+function queueWorkbenchSync() {
+  if (isApplyingRemoteState || !hasCompletedInitialRemoteSync || !authUser.value) return
+
+  syncError.value = ''
+  syncStatus.value = '正在同步'
+  clearTimeout(remoteSyncTimer)
+  remoteSyncTimer = setTimeout(() => {
+    void flushWorkbenchSync()
+  }, 800)
+}
+
+async function flushWorkbenchSync() {
+  if (!authUser.value || isApplyingRemoteState) return
+
+  try {
+    await saveRemoteWorkbenchState(authUser.value.id, collectWorkbenchState())
+    syncStatus.value = '已同步'
+  } catch (error) {
+    syncStatus.value = ''
+    syncError.value = error instanceof Error ? error.message : '同步失败，请稍后重试'
+  }
+}
+
+function resetRemoteSyncState() {
+  clearTimeout(remoteSyncTimer)
+  syncedUserId = ''
+  hasCompletedInitialRemoteSync = false
+  syncStatus.value = ''
+  syncError.value = ''
+}
+
+async function initializeRemoteSync(user: User) {
+  if (syncedUserId === user.id && hasCompletedInitialRemoteSync) return
+
+  clearTimeout(remoteSyncTimer)
+  syncedUserId = user.id
+  hasCompletedInitialRemoteSync = false
+  syncStatus.value = '正在加载云端数据'
+  syncError.value = ''
+
+  try {
+    const remote = await loadRemoteWorkbenchState(user.id)
+
+    if (authUser.value?.id !== user.id) return
+
+    if (remote.state) {
+      applyWorkbenchState(remote.state)
+    } else if (hasLocalWorkbenchState()) {
+      await saveRemoteWorkbenchState(user.id, collectWorkbenchState())
+    }
+
+    hasCompletedInitialRemoteSync = true
+    syncStatus.value = '已同步'
+  } catch (error) {
+    hasCompletedInitialRemoteSync = true
+    syncStatus.value = ''
+    syncError.value = error instanceof Error ? error.message : '云端同步初始化失败'
+  }
+}
+
+function setAuthenticatedUser(user: User | null) {
+  authUser.value = user
+
+  if (!user) {
+    resetRemoteSyncState()
+    return
+  }
+
+  void initializeRemoteSync(user)
+}
+
+function switchAuthMode(mode: 'login' | 'register') {
+  authMode.value = mode
+  authError.value = ''
+  authMessage.value = ''
+}
+
+async function submitAuth() {
+  authError.value = ''
+  authMessage.value = ''
+
+  if (supabaseConfigError) {
+    authError.value = supabaseConfigError
+    return
+  }
+
+  const email = authEmail.value.trim()
+  const password = authPassword.value
+
+  if (!email || !password) {
+    authError.value = '请输入邮箱和密码。'
+    return
+  }
+
+  if (password.length < 6) {
+    authError.value = '密码至少需要 6 位。'
+    return
+  }
+
+  isAuthSubmitting.value = true
+
+  try {
+    if (authMode.value === 'register') {
+      const result = await signUpWithEmail(email, password)
+      authMessage.value = result.session
+        ? '注册成功，正在进入工作台。'
+        : '注册成功，请查看邮箱完成确认后再登录。'
+    } else {
+      await signInWithEmail(email, password)
+      authMessage.value = '登录成功，正在同步数据。'
+    }
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '认证失败，请稍后重试。'
+  } finally {
+    isAuthSubmitting.value = false
+  }
+}
+
+async function handleSignOut() {
+  saveCurrentNote()
+  await flushWorkbenchSync()
+  await signOut()
 }
 
 function toggleStudyNotePosition() {
@@ -839,6 +1129,7 @@ function setCourseVideo(course: Course, lessonId: number, videoUrl: string) {
   } else {
     localStorage.removeItem(key)
   }
+  queueWorkbenchSync()
 
   if (isCurrentLessonVideo) {
     clearCurrentPlaybackTime()
@@ -879,6 +1170,10 @@ function isImageCover(cover: string) {
   return isValidUrl(cover)
 }
 
+function getCourseCoverIcon(_cover: string): IconName {
+  return 'video'
+}
+
 function createCourse() {
   const title = newCourseName.value.trim()
   const videoUrl = newCourseLink.value.trim()
@@ -906,7 +1201,7 @@ function createCourse() {
     title,
     progress: 0,
     status: '未开始',
-    cover: coverUrl || '🎬',
+    cover: coverUrl || 'video-default',
     theme: coverUrl ? 'image' : 'cyan',
     lessons: courseLessons
   }
@@ -1144,6 +1439,7 @@ function saveCurrentNote(source: 'manual' | 'auto' = 'manual') {
 
   syncCurrentNoteFromEditor()
   localStorage.setItem(key, currentNote.value)
+  queueWorkbenchSync()
 
   const savedAt = new Date().toLocaleTimeString('zh-CN', {
     hour: '2-digit',
@@ -1346,7 +1642,7 @@ function createWorkspaceFolder() {
     title,
     progress: 0,
     status: '未开始',
-    cover: '📁',
+    cover: 'folder-default',
     theme: 'gray',
     lessons: [firstNote]
   }
@@ -1609,6 +1905,27 @@ watch(currentNote, () => {
 
 onMounted(() => {
   window.addEventListener('keydown', handleShortcutKeydown)
+  if (supabaseConfigError) {
+    authLoading.value = false
+    authError.value = supabaseConfigError
+    return
+  }
+
+  stopAuthSubscription = onAuthStateChange((_event, session) => {
+    setAuthenticatedUser(session?.user ?? null)
+    authLoading.value = false
+  })
+
+  getCurrentSession()
+    .then((session) => {
+      setAuthenticatedUser(session?.user ?? null)
+    })
+    .catch((error) => {
+      authError.value = error instanceof Error ? error.message : '读取登录状态失败。'
+    })
+    .finally(() => {
+      authLoading.value = false
+    })
 })
 
 onBeforeUnmount(() => {
@@ -1622,6 +1939,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointercancel', stopStudySideSplitResize)
   window.removeEventListener('blur', stopStudySideSplitResize)
   clearTimeout(autoSaveTimer)
+  clearTimeout(remoteSyncTimer)
+  stopAuthSubscription?.()
   destroyYoutubePlayer()
   syncCurrentNoteFromEditor()
   noteEditor.value?.destroy()
@@ -1651,7 +1970,54 @@ function getStatusClass(status: string) {
 </script>
 
 <template>
+  <section v-if="authLoading" class="auth-shell">
+    <div class="auth-card">
+      <img class="auth-logo" :src="kebanLogo" alt="课伴" />
+      <h1>正在加载工作台</h1>
+      <p>正在恢复登录状态。</p>
+    </div>
+  </section>
+
+  <section v-else-if="!authUser" class="auth-shell">
+    <form class="auth-card" @submit.prevent="submitAuth">
+      <img class="auth-logo" :src="kebanLogo" alt="课伴" />
+      <h1>{{ authMode === 'login' ? '登录课伴' : '注册课伴' }}</h1>
+      <p>使用邮箱账号同步课程、视频链接和笔记。</p>
+
+      <label class="auth-field">
+        <span>邮箱</span>
+        <input v-model="authEmail" type="email" autocomplete="email" placeholder="you@example.com" />
+      </label>
+
+      <label class="auth-field">
+        <span>密码</span>
+        <input
+          v-model="authPassword"
+          type="password"
+          :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'"
+          placeholder="至少 6 位"
+        />
+      </label>
+
+      <p v-if="authError || supabaseConfigError" class="auth-error">{{ authError || supabaseConfigError }}</p>
+      <p v-else-if="authMessage" class="auth-message">{{ authMessage }}</p>
+
+      <button class="auth-primary-button" type="submit" :disabled="isAuthSubmitting || Boolean(supabaseConfigError)">
+        {{ isAuthSubmitting ? '处理中...' : authMode === 'login' ? '登录' : '注册' }}
+      </button>
+
+      <button
+        class="auth-switch-button"
+        type="button"
+        @click="switchAuthMode(authMode === 'login' ? 'register' : 'login')"
+      >
+        {{ authMode === 'login' ? '还没有账号？去注册' : '已有账号？去登录' }}
+      </button>
+    </form>
+  </section>
+
   <div
+    v-else
     class="app"
     :class="{
       'fullscreen-active': fullscreenMode,
@@ -1676,11 +2042,20 @@ function getStatusClass(status: string) {
             :title="item.name"
             @click="changeMenu(item.name)"
           >
-            <span class="dock-menu-icon">{{ item.icon }}</span>
+            <svg class="dock-menu-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths[item.icon]" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
       </div>
 
+      <div class="account-menu">
+        <div>
+          <strong>{{ accountEmail }}</strong>
+          <span>{{ syncError || syncStatus }}</span>
+        </div>
+        <button type="button" @click="handleSignOut">退出</button>
+      </div>
     </header>
 
     <div class="layout">
@@ -1693,7 +2068,9 @@ function getStatusClass(status: string) {
       :class="{ active: activeMenu === item.name }"
       @click="changeMenu(item.name)"
   >
-    <span class="menu-icon">{{ item.icon }}</span>
+    <svg class="menu-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path v-for="path in iconPaths[item.icon]" :key="path" :d="path"></path>
+    </svg>
     <span class="menu-label">{{ item.name }}</span>
   </button>
         </nav>
@@ -1715,7 +2092,11 @@ function getStatusClass(status: string) {
                 :class="{ active: activeSettingsSection === item.id }"
                 @click="activeSettingsSection = item.id"
               >
-                <span>{{ item.icon }}</span>
+                <span class="settings-nav-icon">
+                  <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths[item.icon]" :key="path" :d="path"></path>
+                  </svg>
+                </span>
                 {{ item.label }}
               </button>
             </section>
@@ -1782,7 +2163,9 @@ function getStatusClass(status: string) {
             <h1>笔记管理</h1>
             <p>先添加课程后开始整理每个小节的笔记。</p>
             <button class="add-button" @click="goToAddCourse">
-              <span>＋</span>
+              <svg class="button-leading-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path v-for="path in iconPaths.plus" :key="path" :d="path"></path>
+              </svg>
               添加课程
             </button>
           </div>
@@ -1862,7 +2245,9 @@ function getStatusClass(status: string) {
                     :class="{ active: noteWorkspaceCourse?.id === course.id }"
                     @click="selectNoteWorkspaceCourse(course)"
                   >
-                    <span>📁</span>
+                    <svg class="tree-item-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                      <path v-for="path in iconPaths.folder" :key="path" :d="path"></path>
+                    </svg>
                     <strong>{{ course.title }}</strong>
                     <small>{{ course.lessons.length }} 节</small>
                   </button>
@@ -1880,7 +2265,9 @@ function getStatusClass(status: string) {
                           :class="{ active: noteWorkspaceCourse?.id === course.id && noteWorkspaceLesson?.id === lesson.id }"
                           @click="selectNoteWorkspaceLesson(course, lesson)"
                         >
-                          <span>📄</span>
+                          <svg class="tree-item-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                            <path v-for="path in iconPaths.note" :key="path" :d="path"></path>
+                          </svg>
                           <span>{{ lesson.id }}. {{ lesson.title }}</span>
                           <small>{{ hasSavedNote(course, lesson) ? '有笔记' : '空白' }}</small>
                         </button>
@@ -1951,7 +2338,9 @@ function getStatusClass(status: string) {
           </div>
 
           <button class="add-button" @click="addCourse">
-            <span>＋</span>
+            <svg class="button-leading-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.plus" :key="path" :d="path"></path>
+            </svg>
             添加课程
           </button>
         </section>
@@ -1980,7 +2369,9 @@ function getStatusClass(status: string) {
                   aria-label="添加课节"
                   @click="addLesson"
                 >
-                  +
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths.plus" :key="path" :d="path"></path>
+                  </svg>
                 </button>
                 <button
                   type="button"
@@ -2048,7 +2439,11 @@ function getStatusClass(status: string) {
                   :src="selectedCourse.cover"
                   :alt="selectedCourse.title"
                 />
-                <div v-else class="video-cover-icon">{{ selectedCourse.cover }}</div>
+                <div v-else class="video-cover-icon">
+                  <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths[getCourseCoverIcon(selectedCourse.cover)]" :key="path" :d="path"></path>
+                  </svg>
+                </div>
                 <h3>已绑定{{ currentVideoPlatform }}</h3>
                 <p>这个链接暂时不能直接嵌入播放，可以打开原链接学习。</p>
               </div>
@@ -2062,17 +2457,33 @@ function getStatusClass(status: string) {
                 :src="selectedCourse.cover"
                 :alt="selectedCourse.title"
               />
-              <div v-else class="video-cover-icon">{{ selectedCourse.cover }}</div>
+              <div v-else class="video-cover-icon">
+                <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                  <path v-for="path in iconPaths[getCourseCoverIcon(selectedCourse.cover)]" :key="path" :d="path"></path>
+                </svg>
+              </div>
               <h3>{{ selectedLesson.title }}</h3>
               <p>{{ selectedCourse.title }} 系列课程</p>
 
               <div class="fake-video-control">
-                <span>▶</span>
-                <span>🔊</span>
+                <span class="fake-control-icon">
+                  <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths.play" :key="path" :d="path"></path>
+                  </svg>
+                </span>
+                <span class="fake-control-icon">
+                  <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths.volume" :key="path" :d="path"></path>
+                  </svg>
+                </span>
                 <span>02:18 / 18:24</span>
                 <span>1.0x</span>
                 <span>超清</span>
-                <span>⛶</span>
+                <span class="fake-control-icon">
+                  <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-for="path in iconPaths.fullscreen" :key="path" :d="path"></path>
+                  </svg>
+                </span>
               </div>
             </div>
           </section>
@@ -2189,7 +2600,9 @@ function getStatusClass(status: string) {
           >
             <div class="course-cover" :class="course.theme">
               <img v-if="isImageCover(course.cover)" :src="course.cover" :alt="course.title" />
-              <span v-else>{{ course.cover }}</span>
+              <svg v-else class="course-cover-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path v-for="path in iconPaths[getCourseCoverIcon(course.cover)]" :key="path" :d="path"></path>
+              </svg>
             </div>
 
             <div class="course-info">
@@ -2213,7 +2626,11 @@ function getStatusClass(status: string) {
               </div>
             </div>
 
-            <button class="more-button" @click="manageCourse(course, $event)">•••</button>
+            <button class="more-button" type="button" title="管理课程" aria-label="管理课程" @click="manageCourse(course, $event)">
+              <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path v-for="path in iconPaths.more" :key="path" :d="path"></path>
+              </svg>
+            </button>
           </article>
         </section>
       </main>
@@ -2237,7 +2654,9 @@ function getStatusClass(status: string) {
             aria-label="关闭"
             @click="closeAddCourseDialog"
           >
-            ×
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.close" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
 
@@ -2292,7 +2711,9 @@ function getStatusClass(status: string) {
             aria-label="关闭"
             @click="closeCreateWorkspaceNoteDialog"
           >
-            ×
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.close" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
 
@@ -2337,7 +2758,9 @@ function getStatusClass(status: string) {
             aria-label="关闭"
             @click="closeCreateWorkspaceFolderDialog"
           >
-            ×
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.close" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
 
@@ -2382,7 +2805,9 @@ function getStatusClass(status: string) {
             aria-label="关闭"
             @click="closeManageCourseDialog"
           >
-            ×
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.close" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
 
@@ -2433,7 +2858,9 @@ function getStatusClass(status: string) {
             aria-label="关闭"
             @click="closeAddLessonDialog"
           >
-            ×
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.close" :key="path" :d="path"></path>
+            </svg>
           </button>
         </div>
 
@@ -2459,6 +2886,93 @@ function getStatusClass(status: string) {
 </template>
 
 <style scoped>
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f6f8fc;
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  padding: 28px;
+  display: grid;
+  gap: 16px;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
+}
+
+.auth-logo {
+  width: 116px;
+  height: auto;
+}
+
+.auth-card h1 {
+  margin: 0;
+  color: #111827;
+  font-size: 26px;
+}
+
+.auth-card p {
+  margin: 0;
+  color: #64748b;
+}
+
+.auth-field {
+  display: grid;
+  gap: 8px;
+  color: #334155;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.auth-field input {
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  color: #111827;
+  font: inherit;
+  font-weight: 500;
+}
+
+.auth-error {
+  color: #dc2626 !important;
+  font-weight: 700;
+}
+
+.auth-message {
+  color: #2563eb !important;
+  font-weight: 700;
+}
+
+.auth-primary-button,
+.auth-switch-button {
+  height: 44px;
+  border-radius: 8px;
+  font-weight: 800;
+}
+
+.auth-primary-button {
+  border: none;
+  background: #2563eb;
+  color: white;
+}
+
+.auth-primary-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.auth-switch-button {
+  border: 1px solid #dbe3ee;
+  background: white;
+  color: #334155;
+}
+
 .app {
   width: 100vw;
   height: 100vh;
@@ -2466,10 +2980,30 @@ function getStatusClass(status: string) {
   --shell-padding: 16px;
   --panel-gap: 10px;
   --panel-padding: 14px;
+  --accent: #2563eb;
+  --accent-soft: #eef4ff;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --line: #e1e7ef;
+  --shadow-subtle: 0 10px 26px rgba(15, 23, 42, 0.05);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: #f6f8fc;
+}
+
+.ui-icon {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
 }
 
 .top-bar {
@@ -2481,8 +3015,51 @@ function getStatusClass(status: string) {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.account-menu {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #334155;
+}
+
+.account-menu div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.account-menu strong,
+.account-menu span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.account-menu span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.account-menu button {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: white;
-  border-bottom: 1px solid #e5eaf3;
+  color: #334155;
+  font-weight: 800;
 }
 
 .collapsed-dock {
@@ -2492,10 +3069,10 @@ function getStatusClass(status: string) {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.1);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(14px);
   z-index: 2;
 }
@@ -2522,8 +3099,8 @@ function getStatusClass(status: string) {
 .collapsed-dock button:hover,
 .collapsed-dock button.active,
 .brand-sidebar-toggle:hover {
-  background: #f3f7ff;
-  color: #2563eb;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .collapsed-dock button:hover {
@@ -2531,12 +3108,8 @@ function getStatusClass(status: string) {
 }
 
 .dock-menu-icon {
-  display: grid;
-  place-items: center;
   width: 26px;
   height: 26px;
-  font-size: 21px;
-  line-height: 1;
 }
 
 .dock-icon {
@@ -2595,7 +3168,7 @@ function getStatusClass(status: string) {
 }
 
 .dock-add-icon::after {
-  content: '+';
+  content: '';
   position: absolute;
   left: 50%;
   top: 40%;
@@ -2622,7 +3195,7 @@ function getStatusClass(status: string) {
   flex-shrink: 0;
   display: grid;
   place-items: center;
-  border: 1px solid #e5eaf3;
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: white;
   color: #111827;
@@ -2661,8 +3234,8 @@ function getStatusClass(status: string) {
 .sidebar {
   position: relative;
   padding: 20px 14px;
-  background: white;
-  border-right: 1px solid #e5eaf3;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
   overflow: hidden;
   transition:
     opacity 160ms ease,
@@ -2705,7 +3278,7 @@ function getStatusClass(status: string) {
   gap: 14px;
   overflow: hidden;
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   color: #4b5563;
   font-size: 18px;
@@ -2715,14 +3288,15 @@ function getStatusClass(status: string) {
 }
 
 .menu-item.active {
-  color: #2563eb;
-  background: #f3f7ff;
-  border: 1px solid #2563eb;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(37, 99, 235, 0.28);
 }
 
 .menu-icon {
   flex: 0 0 auto;
-  font-size: 24px;
+  width: 23px;
+  height: 23px;
 }
 
 .menu-label {
@@ -2755,10 +3329,10 @@ function getStatusClass(status: string) {
   display: grid;
   align-content: start;
   gap: 8px;
-  border: 1px solid #e1e7ef;
-  border-radius: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.88);
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--shadow-subtle);
 }
 
 .settings-nav-group {
@@ -2774,7 +3348,7 @@ function getStatusClass(status: string) {
   align-items: center;
   gap: 10px;
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   color: #334155;
   text-align: left;
@@ -2784,19 +3358,23 @@ function getStatusClass(status: string) {
     background 150ms ease;
 }
 
-.settings-nav-item span {
+.settings-nav-icon {
   width: 24px;
   height: 24px;
   display: inline-grid;
   place-items: center;
   border-radius: 7px;
-  background: #f8fafc;
+  background: var(--surface-muted);
   color: #64748b;
-  font-size: 14px;
+}
+
+.settings-nav-icon svg {
+  width: 17px;
+  height: 17px;
 }
 
 .settings-nav-item.active {
-  background: #eef4ff;
+  background: var(--accent-soft);
   color: #1d4ed8;
 }
 
@@ -2813,13 +3391,13 @@ function getStatusClass(status: string) {
 
 .settings-nav-item.active:hover,
 .settings-nav-item.active:focus-visible {
-  background: #eef4ff;
+  background: var(--accent-soft);
   color: #1d4ed8;
 }
 
-.settings-nav-item.active span {
-  background: white;
-  color: #2563eb;
+.settings-nav-item.active .settings-nav-icon {
+  background: var(--surface);
+  color: var(--accent);
 }
 
 .settings-main {
@@ -2853,10 +3431,10 @@ function getStatusClass(status: string) {
 
 .settings-module {
   padding: 20px;
-  border: 1px solid #e1e7ef;
-  border-radius: 12px;
-  background: white;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-subtle);
 }
 
 .reset-shortcuts-button,
@@ -2944,7 +3522,7 @@ function getStatusClass(status: string) {
 .page-header h1 {
   margin: 0;
   font-size: 36px;
-  letter-spacing: -1px;
+  letter-spacing: 0;
 }
 
 .page-header p {
@@ -2957,13 +3535,22 @@ function getStatusClass(status: string) {
   flex-shrink: 0;
   height: 52px;
   padding: 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
   border: none;
   border-radius: 8px;
-  background: #2563eb;
+  background: var(--accent);
   color: white;
   font-size: 16px;
   font-weight: 600;
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24);
+}
+
+.button-leading-icon {
+  width: 18px;
+  height: 18px;
 }
 
 .course-grid {
@@ -2983,9 +3570,9 @@ function getStatusClass(status: string) {
   min-width: 0;
   overflow: hidden;
   background: white;
-  border: 1px solid #e1e7ef;
-  border-radius: 10px;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow-subtle);
 }
 
 .course-cover {
@@ -2995,8 +3582,14 @@ function getStatusClass(status: string) {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  font-size: 42px;
   overflow: hidden;
+}
+
+.course-cover-icon {
+  width: 52px;
+  height: 52px;
+  stroke-width: 1.25;
+  color: rgba(255, 255, 255, 0.9);
 }
 
 .course-cover img {
@@ -3061,7 +3654,7 @@ function getStatusClass(status: string) {
   width: min(440px, 100%);
   padding: 24px;
   border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 14px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
 }
@@ -3091,12 +3684,17 @@ function getStatusClass(status: string) {
   width: 34px;
   height: 34px;
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
   color: #475569;
-  font-size: 22px;
-  line-height: 1;
+}
+
+.dialog-close-button svg {
+  width: 18px;
+  height: 18px;
 }
 
 .field-group {
@@ -3273,11 +3871,25 @@ function getStatusClass(status: string) {
   position: absolute;
   right: 14px;
   bottom: 14px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
   border: none;
+  border-radius: 8px;
   background: transparent;
   color: #334155;
-  font-size: 18px;
-  letter-spacing: 2px;
+}
+
+.more-button:hover,
+.more-button:focus-visible {
+  background: var(--surface-muted);
+  color: var(--accent);
+}
+
+.more-button svg {
+  width: 20px;
+  height: 20px;
 }
 
 .note-theme {
@@ -3320,8 +3932,8 @@ function getStatusClass(status: string) {
   min-height: 0;
   background: var(--note-bg-secondary);
   border: 1px solid var(--note-border);
-  border-radius: 10px;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  border-radius: 8px;
+  box-shadow: var(--shadow-subtle);
 }
 
 .notes-folder-panel {
@@ -3395,11 +4007,6 @@ function getStatusClass(status: string) {
 .notes-tree-action-button svg {
   width: 21px;
   height: 21px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .notes-folder-list {
@@ -3432,6 +4039,17 @@ function getStatusClass(status: string) {
   align-items: center;
   gap: 10px;
   border: 1px solid var(--note-border);
+}
+
+.tree-item-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--note-text-muted);
+}
+
+.notes-folder-button.active .tree-item-icon,
+.notes-lesson-button.active .tree-item-icon {
+  color: var(--note-accent-blue);
 }
 
 .notes-folder-button.active {
@@ -3783,8 +4401,8 @@ function getStatusClass(status: string) {
 .video-study-card,
 .note-card {
   background: #fbfdff;
-  border: 1px solid #e5eaf3;
-  border-radius: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 
 .lesson-panel {
@@ -3836,7 +4454,7 @@ function getStatusClass(status: string) {
 .lesson-header-icon-button:hover,
 .lesson-header-icon-button:focus-visible {
   border-color: #dbe3ee;
-  background: white;
+  background: var(--surface);
   color: #2563eb;
   outline: none;
 }
@@ -4039,8 +4657,21 @@ function getStatusClass(status: string) {
 }
 
 .video-cover-icon {
-  font-size: 88px;
-  margin-bottom: 12px;
+  width: 96px;
+  height: 96px;
+  margin-bottom: 14px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.video-cover-icon svg {
+  width: 54px;
+  height: 54px;
+  stroke-width: 1.3;
 }
 
 .video-cover-image {
@@ -4074,6 +4705,19 @@ function getStatusClass(status: string) {
   align-items: center;
   gap: 18px;
   background: rgba(15, 23, 42, 0.7);
+}
+
+.fake-control-icon {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  color: #e5edf8;
+}
+
+.fake-control-icon svg {
+  width: 18px;
+  height: 18px;
 }
 
 .note-card {

@@ -82,7 +82,10 @@ function appendResult() {
     @click="openDialog"
   >
     <span v-if="isGenerating" class="spinner" aria-hidden="true"></span>
-    <span v-else aria-hidden="true">✦</span>
+    <svg v-else class="trigger-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 3.5l1.2 3.2 3.3 1.1-3.3 1.2L10 12.2 8.8 9 5.5 7.8l3.3-1.1L10 3.5Z"></path>
+      <path d="M15 12.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6.6-1.6Z"></path>
+    </svg>
     {{ isGenerating ? '生成中' : 'AI生成' }}
   </button>
 
@@ -94,7 +97,12 @@ function appendResult() {
             <h2 id="ai-note-title">生成视频笔记</h2>
             <p>先生成结构化结果，再追加到当前课节笔记。</p>
           </div>
-          <button type="button" :disabled="isGenerating" aria-label="关闭" @click="closeDialog">×</button>
+          <button type="button" :disabled="isGenerating" aria-label="关闭" @click="closeDialog">
+            <svg class="close-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M5.5 5.5 14.5 14.5"></path>
+              <path d="M14.5 5.5 5.5 14.5"></path>
+            </svg>
+          </button>
         </header>
 
         <div class="controls">
@@ -111,7 +119,7 @@ function appendResult() {
           </fieldset>
 
           <label class="provider-field">
-            <span>STT Provider</span>
+            <span>无字幕时使用的转写服务</span>
             <select v-model="selectedProvider">
               <option value="local_whisper">Local Whisper</option>
               <option value="openai_compatible">OpenAI compatible</option>
@@ -191,11 +199,26 @@ function appendResult() {
   justify-content: center;
   gap: 5px;
   border: 1px solid #bfdbfe;
-  border-radius: 7px;
+  border-radius: 8px;
   background: #eff6ff;
   color: #2563eb;
   font-size: 12px;
   font-weight: 700;
+}
+
+.trigger-icon,
+.close-icon {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trigger-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .ai-note-trigger:disabled {
@@ -231,7 +254,7 @@ function appendResult() {
   overflow: auto;
   padding: 22px;
   border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 14px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
 }
@@ -258,11 +281,17 @@ function appendResult() {
 .ai-dialog header button {
   width: 32px;
   height: 32px;
+  display: grid;
+  place-items: center;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
   color: #475569;
-  font-size: 22px;
+}
+
+.close-icon {
+  width: 18px;
+  height: 18px;
 }
 
 .controls {
@@ -332,7 +361,7 @@ function appendResult() {
   margin-top: 18px;
   padding: 16px;
   border: 1px solid #dbeafe;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #f8fbff;
 }
 
