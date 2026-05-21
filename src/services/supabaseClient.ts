@@ -77,6 +77,19 @@ export async function signOut() {
   if (error) throw error
 }
 
+export async function updateUserProfile(profile: { displayName: string; avatarUrl: string }) {
+  const client = requireSupabase()
+  const { data, error } = await client.auth.updateUser({
+    data: {
+      display_name: profile.displayName,
+      avatar_url: profile.avatarUrl
+    }
+  })
+
+  if (error) throw error
+  return data.user
+}
+
 export async function loadRemoteWorkbenchState(userId: string): Promise<RemoteWorkbenchState> {
   const client = requireSupabase()
   const { data, error } = await client

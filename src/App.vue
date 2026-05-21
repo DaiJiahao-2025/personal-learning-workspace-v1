@@ -19,6 +19,7 @@ import {
   signOut,
   signUpWithEmail,
   supabaseConfigError,
+  updateUserProfile,
   type WorkbenchState
 } from './services/supabaseClient'
 import type { VideoNotePlatform } from './services/videoNotes'
@@ -51,11 +52,44 @@ const isAuthSubmitting = ref(false)
 const syncStatus = ref('')
 const syncError = ref('')
 const accountEmail = computed(() => authUser.value?.email ?? '')
+const isProfileMenuOpen = ref(false)
+const isProfileEditorOpen = ref(false)
+const profileNameDraft = ref('')
+const profileAvatarDraft = ref('')
+const profileError = ref('')
+const profileMessage = ref('')
+const isSavingProfile = ref(false)
+const avatarLoadFailed = ref(false)
 let stopAuthSubscription: (() => void) | undefined
 let remoteSyncTimer: ReturnType<typeof setTimeout> | undefined
 let syncedUserId = ''
 let isApplyingRemoteState = false
 let hasCompletedInitialRemoteSync = false
+
+const accountMetadata = computed(() => (authUser.value?.user_metadata ?? {}) as Record<string, unknown>)
+const accountDisplayName = computed(() => {
+  const displayName = accountMetadata.value.display_name
+  const fullName = accountMetadata.value.full_name
+  const name = accountMetadata.value.name
+  const metadataName = [displayName, fullName, name].find((value) => typeof value === 'string' && value.trim())
+
+  if (typeof metadataName === 'string') return metadataName.trim()
+  return accountEmail.value.split('@')[0] || '课伴用户'
+})
+const accountAvatarUrl = computed(() => {
+  const avatarUrl = accountMetadata.value.avatar_url
+  return typeof avatarUrl === 'string' ? avatarUrl.trim() : ''
+})
+const visibleAccountAvatarUrl = computed(() => (
+  accountAvatarUrl.value && !avatarLoadFailed.value ? accountAvatarUrl.value : ''
+))
+const accountInitials = computed(() => (
+  Array.from(accountDisplayName.value || accountEmail.value || '课伴').slice(0, 2).join('').toUpperCase()
+))
+
+watch(accountAvatarUrl, () => {
+  avatarLoadFailed.value = false
+})
 
 const isSidebarCollapsed = ref(false)
 const iconPaths = {
@@ -71,6 +105,8 @@ const iconPaths = {
   play: ['M7 5.5v9l7-4.5-7-4.5Z'],
   volume: ['M4 8.3h2.8L10 5.5v9l-3.2-2.8H4V8.3Z', 'M13 7.2a4.2 4.2 0 0 1 0 5.6', 'M15 5.5a7 7 0 0 1 0 9'],
   fullscreen: ['M6.8 4H4v2.8', 'M13.2 4H16v2.8', 'M16 13.2V16h-2.8', 'M6.8 16H4v-2.8'],
+  list: ['M6.5 5.5h9', 'M6.5 10h9', 'M6.5 14.5h9', 'M4.2 5.5h.1', 'M4.2 10h.1', 'M4.2 14.5h.1'],
+  grid: ['M4 4h4.5v4.5H4Z', 'M11.5 4H16v4.5h-4.5Z', 'M4 11.5h4.5V16H4Z', 'M11.5 11.5H16V16h-4.5Z'],
   plus: ['M10 4.5v11', 'M4.5 10h11'],
   close: ['M5.5 5.5 14.5 14.5', 'M14.5 5.5 5.5 14.5'],
   more: ['M5.5 10h.1', 'M10 10h.1', 'M14.5 10h.1']
@@ -182,6 +218,8 @@ type Lesson = {
 }
 
 const COURSE_STORAGE_KEY = 'learnflow_courses'
+const COURSE_LAYOUT_STORAGE_KEY = 'learnflow_course_layout'
+type CourseLayout = 'grid' | 'list'
 
 function getCourseNoteKey(courseId: number, lessonId: number) {
   return `learnflow_note_course_${courseId}_lesson_${lessonId}`
@@ -290,7 +328,22 @@ function saveCourses() {
   queueWorkbenchSync()
 }
 
+function isCourseLayout(value: string | null): value is CourseLayout {
+  return value === 'grid' || value === 'list'
+}
+
+function loadSavedCourseLayout() {
+  const savedLayout = localStorage.getItem(COURSE_LAYOUT_STORAGE_KEY)
+  return isCourseLayout(savedLayout) ? savedLayout : 'grid'
+}
+
+function setCourseLayout(layout: CourseLayout) {
+  courseLayout.value = layout
+  localStorage.setItem(COURSE_LAYOUT_STORAGE_KEY, layout)
+}
+
 const courses = ref<Course[]>(loadSavedCourses())
+const courseLayout = ref<CourseLayout>(loadSavedCourseLayout())
 const currentPage = ref<'courseList' | 'courseDetail'>('courseList')
 const selectedCourse = ref<Course | null>(null)
 const isAddCourseDialogOpen = ref(false)
@@ -709,9 +762,108 @@ async function submitAuth() {
 }
 
 async function handleSignOut() {
+  isProfileMenuOpen.value = false
+  isProfileEditorOpen.value = false
   saveCurrentNote()
   await flushWorkbenchSync()
   await signOut()
+}
+
+function toggleProfileMenu() {
+  if (isSavingProfile.value) return
+  isProfileMenuOpen.value = !isProfileMenuOpen.value
+  if (isProfileMenuOpen.value) {
+    isProfileEditorOpen.value = false
+    profileError.value = ''
+    profileMessage.value = ''
+  }
+}
+
+function closeProfileMenu() {
+  isProfileMenuOpen.value = false
+}
+
+function openProfileEditor() {
+  closeProfileMenu()
+  profileNameDraft.value = accountDisplayName.value
+  profileAvatarDraft.value = accountAvatarUrl.value
+  profileError.value = ''
+  profileMessage.value = ''
+  isProfileEditorOpen.value = true
+}
+
+function closeProfileEditor() {
+  if (isSavingProfile.value) return
+  isProfileEditorOpen.value = false
+  profileError.value = ''
+}
+
+function handleAvatarLoadError() {
+  avatarLoadFailed.value = true
+}
+
+function isDataImageUrl(value: string) {
+  return /^data:image\/(?:avif|gif|jpeg|png|svg\+xml|webp);base64,/i.test(value)
+}
+
+function isDirectImageUrl(value: string) {
+  return /^https?:\/\/.+\.(?:avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i.test(value)
+}
+
+function isImagePageUrl(value: string) {
+  try {
+    const url = new URL(value)
+    return ['ibb.co', 'imgbb.com', 'www.imgbb.com'].includes(url.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+function verifyAvatarImage(value: string) {
+  if (!value) return Promise.resolve()
+
+  return new Promise<void>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('头像图片加载失败，请确认链接可直接打开图片。'))
+    image.referrerPolicy = 'no-referrer'
+    image.src = value
+  })
+}
+
+async function saveProfile() {
+  const displayName = profileNameDraft.value.trim()
+  const avatarUrl = profileAvatarDraft.value.trim()
+
+  profileError.value = ''
+  profileMessage.value = ''
+
+  if (!displayName) {
+    profileError.value = '请输入用户名。'
+    return
+  }
+
+  if (avatarUrl && !isDataImageUrl(avatarUrl) && !isDirectImageUrl(avatarUrl)) {
+    profileError.value = isImagePageUrl(avatarUrl)
+      ? '这是图片页面链接，请复制 Direct links 里的 Image link 图片直链。'
+      : '头像请使用 jpg、png、webp、gif、svg 等图片直链。'
+    return
+  }
+
+  isSavingProfile.value = true
+
+  try {
+    await verifyAvatarImage(avatarUrl)
+    const user = await updateUserProfile({ displayName, avatarUrl })
+    authUser.value = user
+    avatarLoadFailed.value = false
+    profileMessage.value = '资料已保存。'
+    isProfileEditorOpen.value = false
+  } catch (error) {
+    profileError.value = error instanceof Error ? error.message : '资料保存失败，请稍后重试。'
+  } finally {
+    isSavingProfile.value = false
+  }
 }
 
 function toggleStudyNotePosition() {
@@ -2049,7 +2201,7 @@ function getStatusClass(status: string) {
         </div>
       </div>
 
-      <div class="account-menu">
+      <div v-if="false" class="account-menu">
         <div>
           <strong>{{ accountEmail }}</strong>
           <span>{{ syncError || syncStatus }}</span>
@@ -2075,6 +2227,78 @@ function getStatusClass(status: string) {
   </button>
         </nav>
 
+        <section class="sidebar-profile" aria-label="登录用户">
+          <div
+            v-if="isProfileMenuOpen"
+            class="profile-popover profile-menu"
+            role="menu"
+            aria-label="账号菜单"
+          >
+            <div class="profile-menu-account">
+              <strong>{{ accountDisplayName }}</strong>
+              <span>{{ accountEmail }}</span>
+            </div>
+            <button class="profile-menu-item" type="button" role="menuitem" @click="openProfileEditor">
+              账号管理
+            </button>
+            <button class="profile-menu-item danger" type="button" role="menuitem" @click="handleSignOut">
+              退出
+            </button>
+          </div>
+
+          <form
+            v-else-if="isProfileEditorOpen"
+            class="profile-popover"
+            aria-label="编辑个人资料"
+            @submit.prevent="saveProfile"
+          >
+            <label class="profile-field">
+              <span>用户名</span>
+              <input v-model="profileNameDraft" type="text" autocomplete="name" maxlength="32" />
+            </label>
+            <label class="profile-field">
+              <span>头像链接</span>
+              <input v-model="profileAvatarDraft" type="text" inputmode="url" autocomplete="url" placeholder="https://..." />
+              <small>请粘贴图片直链，例如 i.ibb.co/...jpg。</small>
+            </label>
+            <p v-if="profileError" class="profile-error">{{ profileError }}</p>
+            <p v-else-if="profileMessage" class="profile-message">{{ profileMessage }}</p>
+            <div class="profile-actions">
+              <button class="profile-secondary-button" type="button" @click="handleSignOut">退出登录</button>
+              <button class="profile-secondary-button" type="button" @click="closeProfileEditor">取消</button>
+              <button class="profile-primary-button" type="submit" :disabled="isSavingProfile">
+                {{ isSavingProfile ? '保存中' : '保存' }}
+              </button>
+            </div>
+          </form>
+
+          <button class="sidebar-profile-main" type="button" @click="toggleProfileMenu">
+            <span class="profile-avatar" aria-hidden="true">
+              <img
+                v-if="visibleAccountAvatarUrl"
+                :src="visibleAccountAvatarUrl"
+                :alt="accountDisplayName"
+                @error="handleAvatarLoadError"
+              />
+              <span v-else>{{ accountInitials }}</span>
+            </span>
+            <span class="profile-copy">
+              <strong>{{ accountDisplayName }}</strong>
+              <small>{{ syncError || syncStatus || accountEmail }}</small>
+            </span>
+          </button>
+
+          <button
+            class="sidebar-profile-more"
+            type="button"
+            :aria-label="isProfileMenuOpen || isProfileEditorOpen ? '关闭账号菜单' : '打开账号菜单'"
+            @click="isProfileMenuOpen || isProfileEditorOpen ? (closeProfileMenu(), closeProfileEditor()) : toggleProfileMenu()"
+          >
+            <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path v-for="path in iconPaths.more" :key="path" :d="path"></path>
+            </svg>
+          </button>
+        </section>
       </aside>
 
       <main class="content">
@@ -2337,12 +2561,41 @@ function getStatusClass(status: string) {
             <p>你的学习打卡主页，掌握学习进度，保持持续成长！</p>
           </div>
 
-          <button class="add-button" @click="addCourse">
-            <svg class="button-leading-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
-              <path v-for="path in iconPaths.plus" :key="path" :d="path"></path>
-            </svg>
-            添加课程
-          </button>
+          <div class="course-header-actions">
+            <div class="course-layout-toggle" role="group" aria-label="课程布局">
+              <button
+                type="button"
+                :class="{ active: courseLayout === 'list' }"
+                title="列表布局"
+                aria-label="切换为列表布局"
+                :aria-pressed="courseLayout === 'list'"
+                @click="setCourseLayout('list')"
+              >
+                <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                  <path v-for="path in iconPaths.list" :key="path" :d="path"></path>
+                </svg>
+              </button>
+              <button
+                type="button"
+                :class="{ active: courseLayout === 'grid' }"
+                title="网格布局"
+                aria-label="切换为网格布局"
+                :aria-pressed="courseLayout === 'grid'"
+                @click="setCourseLayout('grid')"
+              >
+                <svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                  <path v-for="path in iconPaths.grid" :key="path" :d="path"></path>
+                </svg>
+              </button>
+            </div>
+
+            <button class="add-button" @click="addCourse">
+              <svg class="button-leading-icon ui-icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path v-for="path in iconPaths.plus" :key="path" :d="path"></path>
+              </svg>
+              添加课程
+            </button>
+          </div>
         </section>
       </div>
       <div v-else-if="selectedCourse" class="course-detail-page">
@@ -2591,7 +2844,11 @@ function getStatusClass(status: string) {
           </section>
         </section>
       </div>
-        <section v-if="activeMenu !== settingsMenuName && activeMenu !== noteMenuName && currentPage === 'courseList' && courses.length > 0" class="course-grid">
+        <section
+          v-if="activeMenu !== settingsMenuName && activeMenu !== noteMenuName && currentPage === 'courseList' && courses.length > 0"
+          class="course-grid"
+          :class="`course-${courseLayout}`"
+        >
           <article
             v-for="course in courses"
             :key="course.id"
@@ -3019,49 +3276,6 @@ button:focus-visible {
   border-bottom: 1px solid var(--line);
 }
 
-.account-menu {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: #334155;
-}
-
-.account-menu div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  text-align: right;
-}
-
-.account-menu strong,
-.account-menu span {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-menu strong {
-  color: #111827;
-  font-size: 13px;
-}
-
-.account-menu span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.account-menu button {
-  height: 36px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: white;
-  color: #334155;
-  font-weight: 800;
-}
-
 .collapsed-dock {
   height: 54px;
   padding: 6px 14px;
@@ -3234,6 +3448,9 @@ button:focus-visible {
 .sidebar {
   position: relative;
   padding: 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   background: var(--surface);
   border-right: 1px solid var(--line);
   overflow: hidden;
@@ -3265,9 +3482,12 @@ button:focus-visible {
 }
 
 .menu {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
 }
 
 .menu-item {
@@ -3304,6 +3524,288 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+.sidebar-profile {
+  position: relative;
+  min-width: 0;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-profile-main {
+  min-width: 0;
+  flex: 1;
+  height: 56px;
+  padding: 6px 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #111827;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    transform 150ms ease;
+}
+
+.sidebar-profile-main:hover {
+  background: var(--surface-muted);
+}
+
+.profile-avatar {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background:
+    linear-gradient(145deg, rgba(37, 99, 235, 0.18), rgba(20, 184, 166, 0.22)),
+    #eef4ff;
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.profile-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.profile-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.profile-copy strong,
+.profile-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-copy strong {
+  color: #374151;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.profile-copy small {
+  color: #8b94a3;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sidebar-profile-more {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #8b94a3;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.sidebar-profile-more:hover {
+  background: var(--surface-muted);
+  color: #111827;
+}
+
+.sidebar-profile-more svg {
+  width: 22px;
+  height: 22px;
+}
+
+.profile-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 4;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.16);
+}
+
+.profile-menu {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-color: rgba(226, 232, 240, 0.92);
+  background: #fff;
+}
+
+.profile-menu-account {
+  min-width: 0;
+  padding: 14px 18px 16px;
+  display: grid;
+  gap: 6px;
+  border-bottom: 1px solid #eef2f7;
+  color: #111827;
+}
+
+.profile-menu-account strong,
+.profile-menu-account span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-menu-account strong {
+  color: #374151;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.profile-menu-account span {
+  color: #5b6472;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.profile-menu-item {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  background: transparent;
+  color: #374151;
+  font-size: 16px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.profile-menu-item:last-child {
+  border-bottom: none;
+}
+
+.profile-menu-item:hover,
+.profile-menu-item:focus-visible {
+  background: #f8fafc;
+  color: #111827;
+  outline: none;
+}
+
+.profile-menu-item.danger {
+  color: #9f1239;
+}
+
+.profile-menu-item.danger:hover,
+.profile-menu-item.danger:focus-visible {
+  background: #fff1f2;
+  color: #881337;
+}
+
+.profile-field {
+  display: grid;
+  gap: 6px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.profile-field small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.profile-field input {
+  width: 100%;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: #111827;
+  font: inherit;
+}
+
+.profile-field input:focus {
+  border-color: rgba(37, 99, 235, 0.55);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.profile-error,
+.profile-message {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.profile-error {
+  color: #dc2626;
+}
+
+.profile-message {
+  color: #047857;
+}
+
+.profile-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.profile-primary-button,
+.profile-secondary-button {
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.profile-primary-button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.profile-primary-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.profile-secondary-button {
+  border: 1px solid var(--line);
+  background: white;
+  color: #334155;
+}
+
 .content {
   min-width: 0;
   min-height: 0;
@@ -3311,7 +3813,9 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .settings-page {
@@ -3531,6 +4035,64 @@ button:focus-visible {
   font-size: 16px;
 }
 
+.course-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.course-layout-toggle {
+  min-height: 44px;
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 10px;
+  background: #e8edf3;
+}
+
+.course-layout-toggle button {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.course-layout-toggle button:hover,
+.course-layout-toggle button:focus-visible {
+  color: #111827;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.course-layout-toggle button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+.course-layout-toggle button.active {
+  border-color: #111827;
+  background: white;
+  color: #111827;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.course-layout-toggle svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 1.8;
+}
+
 .add-button {
   flex-shrink: 0;
   height: 52px;
@@ -3560,6 +4122,12 @@ button:focus-visible {
   min-width: 0;
 }
 
+.course-grid.course-list {
+  grid-template-columns: 1fr;
+  gap: 0;
+  border-top: 1px solid #e5eaf3;
+}
+
 .course-card {
   position: relative;
   width: 100%;
@@ -3575,6 +4143,31 @@ button:focus-visible {
   box-shadow: var(--shadow-subtle);
 }
 
+.course-card:hover,
+.course-card:focus-within {
+  border-color: #d7e1ef;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+}
+
+.course-grid.course-list .course-card {
+  min-height: 152px;
+  align-items: center;
+  gap: 28px;
+  padding: 18px 60px 18px 0;
+  border-width: 0 0 1px;
+  border-color: #e5eaf3;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.course-grid.course-list .course-card:hover,
+.course-grid.course-list .course-card:focus-within {
+  background: #fbfdff;
+  border-color: #dbe3ee;
+  box-shadow: none;
+}
+
 .course-cover {
   width: 124px;
   height: 124px;
@@ -3583,6 +4176,12 @@ button:focus-visible {
   place-items: center;
   border-radius: 8px;
   overflow: hidden;
+}
+
+.course-grid.course-list .course-cover {
+  width: min(192px, 24vw);
+  height: 120px;
+  aspect-ratio: 16 / 10;
 }
 
 .course-cover-icon {
@@ -3806,6 +4405,14 @@ button:focus-visible {
   min-width: 0;
 }
 
+.course-grid.course-list .course-info {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(220px, 0.85fr);
+  column-gap: clamp(24px, 6vw, 72px);
+  row-gap: 10px;
+  align-items: center;
+}
+
 .course-top {
   display: flex;
   align-items: flex-start;
@@ -3813,10 +4420,22 @@ button:focus-visible {
   gap: 10px;
 }
 
+.course-grid.course-list .course-top {
+  grid-row: 1 / span 2;
+  display: block;
+}
+
 .course-top h3 {
   margin: 8px 0 24px;
   font-size: 17px;
   line-height: 1.4;
+}
+
+.course-grid.course-list .course-top h3 {
+  margin: 0 0 10px;
+  color: #1f2937;
+  font-size: 22px;
+  line-height: 1.25;
 }
 
 .status {
@@ -3849,6 +4468,13 @@ button:focus-visible {
   color: #374151;
 }
 
+.course-grid.course-list .progress-row {
+  grid-column: 2;
+  align-self: end;
+  justify-content: space-between;
+  color: #4b5563;
+}
+
 .progress-row strong {
   font-weight: 700;
 }
@@ -3859,6 +4485,12 @@ button:focus-visible {
   border-radius: 99px;
   overflow: hidden;
   background: #e5eaf3;
+}
+
+.course-grid.course-list .progress-bar {
+  grid-column: 2;
+  align-self: start;
+  margin-top: 0;
 }
 
 .progress-inner {
@@ -3879,6 +4511,13 @@ button:focus-visible {
   border-radius: 8px;
   background: transparent;
   color: #334155;
+}
+
+.course-grid.course-list .more-button {
+  top: 50%;
+  right: 8px;
+  bottom: auto;
+  transform: translateY(-50%);
 }
 
 .more-button:hover,
@@ -4244,6 +4883,30 @@ button:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .course-grid.course-list .course-card {
+    gap: 18px;
+    padding-right: 48px;
+  }
+
+  .course-grid.course-list .course-cover {
+    width: 148px;
+    height: 94px;
+  }
+
+  .course-grid.course-list .course-info {
+    grid-template-columns: 1fr;
+  }
+
+  .course-grid.course-list .course-top,
+  .course-grid.course-list .progress-row,
+  .course-grid.course-list .progress-bar {
+    grid-column: 1;
+  }
+
+  .course-grid.course-list .course-top {
+    grid-row: auto;
+  }
+
   .notes-workspace {
     grid-template-columns: 1fr;
     overflow: auto;
@@ -4288,6 +4951,12 @@ button:focus-visible {
     align-items: start;
   }
 
+  .course-header-actions {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+  }
+
   .add-button {
     height: 44px;
     justify-self: start;
@@ -4303,6 +4972,21 @@ button:focus-visible {
     width: 96px;
     height: 96px;
     font-size: 34px;
+  }
+
+  .course-grid.course-list .course-card {
+    min-height: 126px;
+    gap: 12px;
+    padding: 14px 42px 14px 0;
+  }
+
+  .course-grid.course-list .course-cover {
+    width: 96px;
+    height: 96px;
+  }
+
+  .course-grid.course-list .course-top h3 {
+    font-size: 17px;
   }
 
   .course-top {
@@ -4343,6 +5027,7 @@ button:focus-visible {
 
 .course-study-active .content {
   padding: 12px;
+  overflow: hidden;
 }
 
 .course-detail-page {
@@ -5227,6 +5912,7 @@ button:focus-visible {
   .course-study-active .content,
   .course-study-active.sidebar-collapsed .content {
     padding: 18px;
+    overflow-y: auto;
   }
 
   .course-detail-page {
